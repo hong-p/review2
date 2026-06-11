@@ -22,9 +22,13 @@ TOOLS = {
     "get_diff": "get_pull_request_diff",
     "get_file": "get_file_contents",
     "issue_comment": "add_issue_comment",
+    "issue_comments": "get_issue_comments",
+    "pr_comments": "get_pull_request_comments",
     "review_start": "create_pending_pull_request_review",
     "review_add_comment": "add_comment_to_pending_review",
     "review_submit": "submit_pending_pull_request_review",
+    # 기존 리뷰 코멘트 스레드에 답글. 서버 버전에 따라 미지원일 수 있음 (호출부에서 fallback)
+    "reply_comment": "add_pull_request_review_comment",
 }
 
 
@@ -86,11 +90,57 @@ class GitHubMCP:
         self._file_cache[cache_key] = content
         return content
 
+    async def get_existing_comments(self) -> list[dict]:
+        """이미 달린 코멘트 전부 (PR 대화 코멘트 + 인라인 리뷰 코멘트).
+
+        returns [{id, type: "issue"|"inline", user, path?, line?, body}]
+        코멘트 조회 툴이 없는 서버 버전이면 빈 목록 (경고만 남김).
+        """
+        out: list[dict] = []
+        try:
+            data = await self.call_json("issue_comments", issue_number=self.cfg.pr_number)
+            if isinstance(data, dict):
+                data = data.get("comments", [])
+            for c in data:
+                out.append({
+                    "id": c.get("id"),
+                    "type": "issue",
+                    "user": (c.get("user") or {}).get("login", ""),
+                    "body": c.get("body", ""),
+                })
+        except Exception as e:
+            log.warning("기존 PR 대화 코멘트 조회 실패 (계속 진행): %s", e)
+        try:
+            data = await self.call_json("pr_comments", pullNumber=self.cfg.pr_number)
+            if isinstance(data, dict):
+                data = data.get("comments", [])
+            for c in data:
+                out.append({
+                    "id": c.get("id"),
+                    "type": "inline",
+                    "user": (c.get("user") or {}).get("login", ""),
+                    "path": c.get("path", ""),
+                    "line": c.get("line") or c.get("original_line"),
+                    "body": c.get("body", ""),
+                })
+        except Exception as e:
+            log.warning("기존 인라인 리뷰 코멘트 조회 실패 (계속 진행): %s", e)
+        return out
+
     # ---- write ---------------------------------------------------------
 
     async def add_issue_comment(self, body: str):
         return await self.call(
             "issue_comment", issue_number=self.cfg.pr_number, body=body
+        )
+
+    async def reply_to_review_comment(self, comment_id: int, body: str):
+        """기존 인라인 리뷰 코멘트 스레드에 답글. 미지원 서버면 예외 발생."""
+        return await self.call(
+            "reply_comment",
+            pullNumber=self.cfg.pr_number,
+            in_reply_to=comment_id,
+            body=body,
         )
 
     async def post_inline_review(self, comments: list[dict], body: str) -> int:

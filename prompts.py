@@ -17,6 +17,8 @@ CHANGED_ANALYZER_SYSTEM = """\
 diff의 각 라인 앞에는 R<라인번호>(새 파일 기준) / L<라인번호>(원본 기준) 주석이 붙어 있다.
 지적할 때는 반드시 이 라인번호를 함께 적어라 (예: gitops/.../values.yaml R42).
 
+대형 PR은 파일 그룹 단위로 나뉘어 주어질 수 있다. 그 경우 주어진 파일들만 분석하면 된다.
+
 {language}로 답하라.
 """
 
@@ -39,13 +41,17 @@ diff가 아니라, 변경 전(base 브랜치) 원본 파일들이 주어진다.
    - 다른 값이 환경 특성상 의도된 차이인지, 누락/불일치로 보이는지 판단
    - 대응 파일이 존재하지 않는 환경이 있으면 그 자체를 지적
 
+대형 PR은 파일 그룹 단위로 나뉘어 주어질 수 있다. 그 경우 주어진 파일들만 분석하면 된다.
+
 {language}로 답하라.
 """
 
 COMPARE_REVIEWER_SYSTEM = """\
 당신은 GitOps PR의 최종 리뷰어다.
-입력으로 (1) 변경사항 분석, (2) 기존 코드 분석, (3) 라인번호 주석이 붙은 diff가 주어진다.
+입력으로 (1) 변경사항 분석, (2) 기존 코드 분석, (3) 라인번호 주석이 붙은 diff,
+(4) 이미 PR에 달려 있는 코멘트 목록(있는 경우)이 주어진다.
 두 분석을 비교·종합해서 최종 리뷰를 작성하라.
+대형 PR은 diff가 파일 그룹으로 나뉘어 주어질 수 있다. 그 경우 주어진 파일들에 대해서만 지적하라.
 
 리뷰 관점:
 - RULE.md 규칙 위반 (해당 폴더에 적용되는 규칙 기준)
@@ -68,8 +74,21 @@ COMPARE_REVIEWER_SYSTEM = """\
       "severity": "error",
       "body": "코멘트 내용 (markdown)"
     }}
+  ],
+  "agreements": [
+    {{
+      "comment_id": 123456,
+      "body": "동일한 의견입니다. (필요하면 보충 설명 한두 문장)"
+    }}
   ]
 }}
+
+기존 코멘트 중복 처리 규칙:
+- '이미 달린 코멘트' 목록에 같은 취지의 지적(봇이든 사람이든)이 이미 있으면,
+  inline_comments와 summary에 다시 쓰지 마라.
+- 대신 그 코멘트의 id를 agreements에 넣어라. body는 동의 표시 + 필요시 짧은 보충만.
+- 같은 기존 코멘트에는 agreement를 하나만 만들어라.
+- 기존 코멘트가 없거나 중복이 없으면 agreements는 빈 배열로.
 
 인라인 코멘트 규칙:
 - line은 diff에 주석으로 표시된 라인번호만 사용하라. R42 라인이면 line=42, side="RIGHT". L17 라인(삭제된 라인)이면 line=17, side="LEFT".
@@ -83,6 +102,15 @@ summary와 body는 {language}로 작성하라.
 
 JSON_REPAIR_SYSTEM = """\
 다음 텍스트에서 JSON 객체를 추출해 유효한 JSON 하나만 출력하라.
-스키마: {"summary": string, "inline_comments": [{"path": string, "line": int, "side": "RIGHT"|"LEFT", "severity": string, "body": string}]}
+스키마: {"summary": string, "inline_comments": [{"path": string, "line": int, "side": "RIGHT"|"LEFT", "severity": string, "body": string}], "agreements": [{"comment_id": int, "body": string}]}
 JSON 외에는 아무것도 출력하지 마라.
+"""
+
+MERGE_SUMMARY_SYSTEM = """\
+대형 PR이라 파일 그룹별로 나눠 작성된 리뷰 summary 조각들이 주어진다.
+이를 하나의 일관된 PR 전체 리뷰 코멘트(markdown)로 합쳐라.
+- 중복 제거, 변경 요약 → 잘된 점 → 주요 우려사항 → 룰 위반 순서로 재구성
+- 그룹 번호 언급 금지 (독자는 그룹 구분을 모른다)
+- JSON이 아니라 markdown 텍스트만 출력하라
+{language}로 작성하라.
 """

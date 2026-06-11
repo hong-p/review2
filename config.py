@@ -17,6 +17,9 @@ class Config:
     llm_base_url: str = ""
     llm_api_key: str = "dummy"
     llm_model: str = ""
+    llm_timeout: float = 600.0   # 로컬 LLM이 느릴 수 있어 호출당 대기 시간(초)을 길게 잡는다
+    llm_max_retries: int = 2
+    llm_concurrency: int = 2     # 배치 병렬 호출 시 로컬 LLM 과부하 방지
 
     # GitHub MCP 서버 실행 커맨드 (stdio)
     mcp_command: list[str] = field(default_factory=list)
@@ -24,10 +27,13 @@ class Config:
     # 동작 옵션
     review_language: str = "Korean"
     dry_run: bool = False
-    max_diff_chars: int = 60_000
-    max_file_chars: int = 20_000
-    max_base_total_chars: int = 80_000
+    # 대형 PR 처리: 아래 값들은 'LLM 호출 1회당' 예산이다.
+    # 초과하면 파일 단위 배치로 쪼개서 여러 번 호출 후 결과를 병합한다.
+    max_diff_chars: int = 60_000        # 호출당 diff 예산
+    max_file_chars: int = 20_000        # 파일 1개당 상한
+    max_base_total_chars: int = 80_000  # 호출당 base/peer 파일 예산
     max_peer_total_chars: int = 60_000
+    max_comments_chars: int = 15_000    # 기존 리뷰 코멘트 전달 상한
 
 
 DEFAULT_MCP_CMD = (
@@ -53,6 +59,12 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="[env: LLM_API_KEY, 기본 dummy]")
     p.add_argument("--llm-model", default=env("LLM_MODEL", ""),
                    help="모델 이름 [env: LLM_MODEL]")
+    p.add_argument("--llm-timeout", type=float, default=float(env("LLM_TIMEOUT", "600")),
+                   help="LLM 호출당 대기 시간(초) [env: LLM_TIMEOUT, 기본 600]")
+    p.add_argument("--llm-retries", type=int, default=int(env("LLM_MAX_RETRIES", "2")),
+                   help="LLM 호출 실패 시 재시도 횟수 [env: LLM_MAX_RETRIES, 기본 2]")
+    p.add_argument("--llm-concurrency", type=int, default=int(env("LLM_CONCURRENCY", "2")),
+                   help="LLM 동시 호출 수 [env: LLM_CONCURRENCY, 기본 2]")
     p.add_argument("--mcp-cmd", default=env("GITHUB_MCP_CMD", DEFAULT_MCP_CMD),
                    help="GitHub MCP 서버 실행 커맨드 [env: GITHUB_MCP_CMD]")
     p.add_argument("--language", default=env("REVIEW_LANGUAGE", "Korean"),
@@ -81,6 +93,9 @@ def load_config(argv: list[str] | None = None) -> Config:
         llm_base_url=args.llm_base_url,
         llm_api_key=args.llm_api_key,
         llm_model=args.llm_model,
+        llm_timeout=args.llm_timeout,
+        llm_max_retries=args.llm_retries,
+        llm_concurrency=max(1, args.llm_concurrency),
         mcp_command=shlex.split(args.mcp_cmd),
         review_language=args.language,
         dry_run=args.dry_run,

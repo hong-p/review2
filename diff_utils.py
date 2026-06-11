@@ -72,6 +72,57 @@ def parse_diff(diff_text: str) -> tuple[dict, str]:
     return valid, "\n".join(annotated)
 
 
+def split_diff_by_file(annotated_diff: str) -> dict[str, str]:
+    """주석 붙은 diff를 파일 단위로 쪼갠다. 대형 PR 배치 처리용.
+
+    returns {path: 해당 파일의 diff 텍스트}
+    """
+    chunks: dict[str, str] = {}
+    current: list[str] = []
+    path: str | None = None
+
+    def flush():
+        if current:
+            chunks[path or f"(unknown-{len(chunks)})"] = "\n".join(current)
+
+    for line in annotated_diff.splitlines():
+        if line.startswith("diff --git"):
+            flush()
+            current = [line]
+            path = None
+            continue
+        current.append(line)
+        if path is None and line.startswith("+++ "):
+            target = line[4:].strip()
+            if target != "/dev/null":
+                path = target[2:] if target.startswith("b/") else target
+        elif path is None and line.startswith("--- "):
+            target = line[4:].strip()
+            if target != "/dev/null":
+                path = target[2:] if target.startswith("a/") else target
+    flush()
+    return chunks
+
+
+def pack_batches(items: dict[str, str], limit: int) -> list[dict[str, str]]:
+    """파일들을 limit(문자 수) 이하 묶음으로 그리디 패킹한다.
+
+    limit보다 큰 단일 파일은 혼자 한 배치가 된다 (호출부에서 clip 처리).
+    """
+    batches: list[dict[str, str]] = []
+    cur: dict[str, str] = {}
+    size = 0
+    for path, text in items.items():
+        if cur and size + len(text) > limit:
+            batches.append(cur)
+            cur, size = {}, 0
+        cur[path] = text
+        size += len(text)
+    if cur:
+        batches.append(cur)
+    return batches or [{}]
+
+
 def validate_comments(comments: list[dict], valid_lines: dict) -> tuple[list[dict], list[dict]]:
     """LLM이 만든 인라인 코멘트를 diff 기준으로 검증.
 

@@ -29,6 +29,14 @@ fetch_pr (GitHub MCP)
   **PR에서 변경되지 않은 대응 파일**도 읽어온다. base_analyzer가 환경 간 값을 비교해
   통일 여부 / 의도된 차이 여부를 분석하고, compare_reviewer가 리뷰에 반영한다.
   포맷은 [RULE.example.md](RULE.example.md) 참고.
+- **대형 PR 지원**: diff를 자르지 않는다. 호출당 예산(`max_diff_chars` 등)을 넘으면
+  파일 단위 배치로 쪼개 LLM을 여러 번 호출(동시 `--llm-concurrency`개)하고,
+  summary는 별도 병합 호출로, 인라인 코멘트는 중복 제거 후 합친다.
+- **리뷰 중복 방지**: 이미 PR에 달린 코멘트(봇/사람 모두)를 읽어 reviewer에 전달한다.
+  같은 취지의 지적은 새로 달지 않고, 기존 인라인 코멘트 스레드에 "동일한 의견입니다"
+  답글을 단다 (답글 미지원 서버면 원문 인용 일반 코멘트로 fallback).
+- **느린 로컬 LLM 대응**: 호출당 타임아웃 기본 600초(`--llm-timeout`),
+  실패 시 자동 재시도(`--llm-retries`), 동시 호출 수 제한(`--llm-concurrency`).
 - **인라인 코멘트 검증**: diff를 파싱해 라인번호 주석(R/L)을 붙여 LLM에 주고,
   LLM이 지정한 (path, line, side)가 실제 diff 안에 있는지 검증한다.
   검증 실패한 코멘트는 PR 전체 코멘트 하단에 "기타 지적"으로 합쳐진다.
@@ -59,6 +67,9 @@ fetch_pr (GitHub MCP)
 | `--llm-base-url` | `LLM_BASE_URL` | ✅ | 로컬 LLM OpenAI-compatible 엔드포인트 (예: `http://llm:8000/v1`) |
 | `--llm-model` | `LLM_MODEL` | ✅ | 모델 이름 |
 | `--llm-api-key` | `LLM_API_KEY` | | 기본 `dummy` |
+| `--llm-timeout` | `LLM_TIMEOUT` | | LLM 호출당 대기 시간(초), 기본 `600` |
+| `--llm-retries` | `LLM_MAX_RETRIES` | | 호출 실패 시 재시도 횟수, 기본 `2` |
+| `--llm-concurrency` | `LLM_CONCURRENCY` | | LLM 동시 호출 수, 기본 `2` |
 | `--mcp-cmd` | `GITHUB_MCP_CMD` | | MCP 서버 실행 커맨드. 기본: `docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server`. 바이너리가 있으면 `github-mcp-server stdio` |
 | `--language` | `REVIEW_LANGUAGE` | | 리뷰 언어, 기본 `Korean` |
 | `--dry-run` | `DRY_RUN=1` | | GitHub에 게시하지 않고 로그로만 출력 |
@@ -121,6 +132,9 @@ pipeline {
 - GitHub MCP 서버 버전에 따라 툴 이름이 다를 수 있다.
   `github_mcp.py` 상단 `TOOLS` 딕셔너리만 맞춰주면 된다.
   (현재 기준: `get_pull_request`, `get_pull_request_files`, `get_pull_request_diff`,
-  `get_file_contents`, `add_issue_comment`, `create_pending_pull_request_review`,
-  `add_comment_to_pending_review`, `submit_pending_pull_request_review`)
+  `get_file_contents`, `add_issue_comment`, `get_issue_comments`,
+  `get_pull_request_comments`, `create_pending_pull_request_review`,
+  `add_comment_to_pending_review`, `submit_pending_pull_request_review`.
+  답글용 `add_pull_request_review_comment`는 서버 버전에 따라 없을 수 있으며,
+  없으면 자동으로 일반 코멘트 fallback)
 - diff/파일 크기 상한(`config.py`의 `max_*`)을 로컬 LLM 컨텍스트 길이에 맞게 조정할 것.

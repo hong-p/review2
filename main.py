@@ -34,9 +34,10 @@ async def run() -> int:
         result = await graph.ainvoke({})
 
     log.info(
-        "리뷰 완료: 전체 코멘트=%s, 인라인 코멘트=%d개 등록 (탈락 %d개)",
+        "리뷰 완료: 전체 코멘트=%s, 인라인 %d개, 기존 코멘트 동의 %d개 (탈락 %d개)",
         result.get("posted_summary"),
         result.get("posted_inline", 0),
+        result.get("posted_agreements", 0),
         len(result.get("dropped_comments", [])),
     )
     return 0

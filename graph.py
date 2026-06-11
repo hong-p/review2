@@ -3,7 +3,14 @@
 fetch_pr ──┬─> changed_analyzer ──┬─> compare_reviewer ──┬─> post_summary
            └─> base_analyzer    ──┘                      └─> post_inline
 (analyzer 2개 병렬, 게시 2개 병렬)
+
+대형 PR 처리: diff/base 파일이 호출당 예산(cfg.max_*)을 넘으면 파일 단위 배치로
+쪼개서 LLM을 여러 번 호출하고 결과를 병합한다. diff 자체는 자르지 않는다.
+
+중복 방지: 이미 PR에 달린 코멘트(봇/사람)를 reviewer에 전달한다. 같은 취지의
+지적은 새로 달지 않고 기존 코멘트에 동의 답글(agreements)을 단다.
 """
+import asyncio
 import json
 import logging
 import posixpath
@@ -15,7 +22,7 @@ from langgraph.graph import END, START, StateGraph
 import prompts
 import rules
 from config import Config
-from diff_utils import parse_diff, validate_comments
+from diff_utils import pack_batches, parse_diff, split_diff_by_file, validate_comments
 from github_mcp import GitHubMCP
 from llm import LLM, clip
 
@@ -23,6 +30,7 @@ log = logging.getLogger(__name__)
 
 RULE_FILENAME = "RULE.md"
 SEVERITY_MARK = {"error": "🔴", "warn": "🟡", "info": "🔵"}
+ANALYSIS_BUDGET = 30_000  # reviewer에 전달하는 analyzer 결과물 상한 (각각)
 
 
 class ReviewState(TypedDict, total=False):
@@ -33,6 +41,7 @@ class ReviewState(TypedDict, total=False):
     head_sha: str
     changed_files: list[dict]      # [{path, status}]
     annotated_diff: str
+    diff_by_file: dict[str, str]   # path → 해당 파일 diff (배치 처리용)
     valid_lines: dict              # {path: {"RIGHT": set, "LEFT": set}}
     rule_changed: bool
     head_rules: dict[str, str]     # PR에서 RULE.md가 변경된 경우 head 버전
@@ -41,6 +50,7 @@ class ReviewState(TypedDict, total=False):
     peer_map: dict[str, list[str]]  # 변경 파일 → 참고 환경 대응 파일 경로
     peer_files: dict[str, str]      # 참고 환경 대응 파일 내용 (변경되지 않은 파일)
     missing_peers: list[str]        # 참고 환경에 존재하지 않는 대응 파일
+    existing_comments: list[dict]   # 이미 달린 코멘트 [{id, type, user, path?, line?, body}]
     # analyzer 결과 (병렬 — 서로 다른 키에 기록)
     changed_analysis: str
     base_analysis: str
@@ -48,9 +58,11 @@ class ReviewState(TypedDict, total=False):
     review_summary: str
     inline_comments: list[dict]
     dropped_comments: list[dict]
+    agreements: list[dict]          # 기존 코멘트 동의 답글 [{comment_id, body}]
     # 게시 결과 (병렬 — 서로 다른 키에 기록)
     posted_summary: bool
     posted_inline: int
+    posted_agreements: int
 
 
 def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
@@ -61,7 +73,8 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
     async def fetch_pr(state: ReviewState) -> ReviewState:
         pr = await gh.get_pull_request()
         files = await gh.get_pull_request_files()
-        diff = clip(await gh.get_pull_request_diff(), cfg.max_diff_chars, "diff")
+        diff = await gh.get_pull_request_diff()  # 대형 PR도 전체 유지 (배치로 처리)
+        existing_comments = await gh.get_existing_comments()
 
         base_sha = pr["base"]["sha"]
         head_sha = pr["head"]["sha"]
@@ -70,6 +83,7 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
             for f in files
         ]
         valid_lines, annotated_diff = parse_diff(diff)
+        diff_by_file = split_diff_by_file(annotated_diff)
 
         # --- RULE.md 변경 여부 분기 ---
         rule_paths_in_pr = [
@@ -94,7 +108,6 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
                     base_rules[rule_path] = clip(content, cfg.max_file_chars, rule_path)
 
         # --- 참고 환경 교차 비교: RULE.md의 reference_environments 기반 ---
-        # 예: dev2/deployment.yaml 변경 → 같은 그룹의 qa2/deployment.yaml(미변경)도 읽는다
         rule_texts = list(head_rules.values()) + list(base_rules.values())
         env_groups = rules.parse_env_groups(rule_texts)
         peer_map = (
@@ -104,45 +117,33 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
         )
         peer_files: dict[str, str] = {}
         missing_peers: list[str] = []
-        peer_total = 0
         for src, peer_paths in peer_map.items():
             for p in peer_paths:
                 if p in peer_files or p in missing_peers:
                     continue
-                if peer_total >= cfg.max_peer_total_chars:
-                    log.warning("참고 환경 파일 수집 상한 도달, 이후 생략: %s", p)
-                    break
                 content = await gh.get_file_contents(p, head_sha)
                 if content is None:
                     missing_peers.append(p)
                 else:
-                    content = clip(content, cfg.max_file_chars, p)
-                    peer_files[p] = content
-                    peer_total += len(content)
+                    peer_files[p] = clip(content, cfg.max_file_chars, p)
         if env_groups:
             log.info(
                 "참고 환경 그룹 %s → 대응 파일 %d개 수집, %d개 없음",
                 env_groups, len(peer_files), len(missing_peers),
             )
 
-        # --- 변경 파일들의 base 원본 수집 (신규 파일 제외) ---
+        # --- 변경 파일들의 base 원본 수집 (신규 파일 제외, 파일당 상한만 적용) ---
         base_files: dict[str, str] = {}
-        total = 0
         for f in changed:
             if f["status"] == "added" or posixpath.basename(f["path"]) == RULE_FILENAME:
                 continue
-            if total >= cfg.max_base_total_chars:
-                log.warning("base 파일 수집 상한 도달, 이후 파일 생략: %s", f["path"])
-                break
             content = await gh.get_file_contents(f["path"], base_sha)
             if content is not None:
-                content = clip(content, cfg.max_file_chars, f["path"])
-                base_files[f["path"]] = content
-                total += len(content)
+                base_files[f["path"]] = clip(content, cfg.max_file_chars, f["path"])
 
         log.info(
-            "PR #%s: 파일 %d개, RULE.md 변경=%s (head_rules=%d, base_rules=%d)",
-            cfg.pr_number, len(changed), rule_changed, len(head_rules), len(base_rules),
+            "PR #%s: 파일 %d개 (diff %d자), RULE.md 변경=%s, 기존 코멘트 %d개",
+            cfg.pr_number, len(changed), len(diff), rule_changed, len(existing_comments),
         )
         return {
             "pr_title": pr.get("title", ""),
@@ -151,6 +152,7 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
             "head_sha": head_sha,
             "changed_files": changed,
             "annotated_diff": annotated_diff,
+            "diff_by_file": diff_by_file,
             "valid_lines": valid_lines,
             "rule_changed": rule_changed,
             "head_rules": head_rules,
@@ -159,6 +161,7 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
             "peer_map": peer_map,
             "peer_files": peer_files,
             "missing_peers": missing_peers,
+            "existing_comments": existing_comments,
         }
 
     # ---- node: changed_analyzer (병렬 1) --------------------------------
@@ -169,15 +172,25 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
             rule_section = "\n\n## 이번 PR에서 변경된 RULE.md (head 버전)\n" + _join_files(
                 state["head_rules"]
             )
-        user = (
-            f"# PR: {state['pr_title']}\n{state['pr_body']}\n"
-            f"{rule_section}\n\n"
-            f"## diff (라인번호 주석 포함)\n```diff\n{state['annotated_diff']}\n```"
-        )
-        analysis = await llm.chat(
-            prompts.CHANGED_ANALYZER_SYSTEM.format(language=lang), user
-        )
-        log.info("changed_analyzer 완료 (%d자)", len(analysis))
+        system = prompts.CHANGED_ANALYZER_SYSTEM.format(language=lang)
+        batches = pack_batches(state["diff_by_file"], cfg.max_diff_chars)
+
+        async def one(batch: dict[str, str], idx: int) -> str:
+            note = (
+                f"\n(대형 PR: 파일 그룹 {idx + 1}/{len(batches)} — 이 그룹의 파일만 분석)\n"
+                if len(batches) > 1 else ""
+            )
+            diff_text = clip("\n".join(batch.values()), cfg.max_diff_chars, "diff")
+            user = (
+                f"# PR: {state['pr_title']}\n{state['pr_body']}\n{note}"
+                f"{rule_section}\n\n"
+                f"## diff (라인번호 주석 포함)\n```diff\n{diff_text}\n```"
+            )
+            return await llm.chat(system, user)
+
+        parts = await asyncio.gather(*(one(b, i) for i, b in enumerate(batches)))
+        analysis = _merge_parts(parts)
+        log.info("changed_analyzer 완료 (배치 %d개, %d자)", len(batches), len(analysis))
         return {"changed_analysis": analysis}
 
     # ---- node: base_analyzer (병렬 2) ------------------------------------
@@ -191,7 +204,7 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
         changed_list = "\n".join(
             f"- {f['path']} ({f['status']})" for f in state["changed_files"]
         )
-        peer_section = ""
+        peer_info = ""
         if state["peer_map"]:
             mapping = "\n".join(
                 f"- {src}\n" + "\n".join(f"  - 비교 대상: {p}" for p in peers)
@@ -202,54 +215,123 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
                 missing = "\n존재하지 않는 대응 파일 (환경 간 파일 구성 불일치 가능성):\n" + "\n".join(
                     f"- {p}" for p in state["missing_peers"]
                 )
-            peer_section = (
-                f"\n\n## 참고 환경 대응 파일 (이번 PR에서 변경되지 않음)\n"
-                f"변경 파일과 비교해야 할 다른 환경의 파일들이다.\n{mapping}\n{missing}\n\n"
-                f"{_join_files(state['peer_files'])}"
+            peer_info = f"\n\n## 참고 환경 비교 매핑\n{mapping}\n{missing}"
+
+        # base 원본과 참고 환경 파일을 합쳐서 배치 (접두어로 구분)
+        items = {f"BASE::{p}": c for p, c in state["base_files"].items()}
+        items.update({f"PEER::{p}": c for p, c in state["peer_files"].items()})
+        system = prompts.BASE_ANALYZER_SYSTEM.format(language=lang)
+        batches = pack_batches(items, cfg.max_base_total_chars)
+
+        async def one(batch: dict[str, str], idx: int) -> str:
+            note = (
+                f"\n(대형 PR: 파일 그룹 {idx + 1}/{len(batches)} — 이 그룹의 파일만 분석)\n"
+                if len(batches) > 1 else ""
             )
-        user = (
-            f"# PR: {state['pr_title']}\n\n"
-            f"## 이번 PR에서 변경된 파일 목록\n{changed_list}\n"
-            f"{rule_section}\n\n"
-            f"## 변경 전(base) 원본 파일\n{_join_files(state['base_files']) or '(전부 신규 파일)'}"
-            f"{peer_section}"
-        )
-        analysis = await llm.chat(
-            prompts.BASE_ANALYZER_SYSTEM.format(language=lang), user
-        )
-        log.info("base_analyzer 완료 (%d자)", len(analysis))
+            base_part = {k[6:]: v for k, v in batch.items() if k.startswith("BASE::")}
+            peer_part = {k[6:]: v for k, v in batch.items() if k.startswith("PEER::")}
+            peer_section = ""
+            if peer_part:
+                peer_section = (
+                    "\n\n## 참고 환경 대응 파일 (이번 PR에서 변경되지 않음)\n"
+                    + _join_files(peer_part)
+                )
+            user = (
+                f"# PR: {state['pr_title']}\n{note}\n"
+                f"## 이번 PR에서 변경된 파일 목록\n{changed_list}\n"
+                f"{rule_section}{peer_info}\n\n"
+                f"## 변경 전(base) 원본 파일\n{_join_files(base_part) or '(전부 신규 파일)'}"
+                f"{peer_section}"
+            )
+            return await llm.chat(system, user)
+
+        parts = await asyncio.gather(*(one(b, i) for i, b in enumerate(batches)))
+        analysis = _merge_parts(parts)
+        log.info("base_analyzer 완료 (배치 %d개, %d자)", len(batches), len(analysis))
         return {"base_analysis": analysis}
 
     # ---- node: compare_reviewer ------------------------------------------
 
     async def compare_reviewer(state: ReviewState) -> ReviewState:
-        user = (
-            f"# PR: {state['pr_title']}\n\n"
-            f"## 변경사항 분석 (에이전트 1)\n{state['changed_analysis']}\n\n"
-            f"## 기존 코드 분석 (에이전트 2)\n{state['base_analysis']}\n\n"
-            f"## diff (라인번호 주석 포함)\n```diff\n{state['annotated_diff']}\n```"
+        system = prompts.COMPARE_REVIEWER_SYSTEM.format(language=lang)
+        existing_section = ""
+        if state["existing_comments"]:
+            existing_section = (
+                "\n\n## 이미 PR에 달려 있는 코멘트 (중복 지적 금지, 같은 취지면 agreements로)\n"
+                + _format_existing_comments(state["existing_comments"], cfg.max_comments_chars)
+            )
+        analyses = (
+            f"## 변경사항 분석 (에이전트 1)\n{clip(state['changed_analysis'], ANALYSIS_BUDGET, '분석1')}\n\n"
+            f"## 기존 코드 분석 (에이전트 2)\n{clip(state['base_analysis'], ANALYSIS_BUDGET, '분석2')}"
         )
-        raw = await llm.chat(
-            prompts.COMPARE_REVIEWER_SYSTEM.format(language=lang), user
-        )
-        try:
-            review = _extract_json(raw)
-        except (ValueError, json.JSONDecodeError):
-            log.warning("리뷰 JSON 파싱 실패 — 복구 시도")
-            repaired = await llm.chat(prompts.JSON_REPAIR_SYSTEM, raw, temperature=0.0)
-            review = _extract_json(repaired)
+        batches = pack_batches(state["diff_by_file"], cfg.max_diff_chars)
 
-        summary = str(review.get("summary", "")).strip()
-        comments = review.get("inline_comments") or []
-        comments = [c for c in comments if isinstance(c, dict)]
+        async def one(batch: dict[str, str], idx: int) -> dict:
+            note = (
+                f"\n(대형 PR: 파일 그룹 {idx + 1}/{len(batches)} — 이 그룹의 파일에 대해서만 지적)\n"
+                if len(batches) > 1 else ""
+            )
+            diff_text = clip("\n".join(batch.values()), cfg.max_diff_chars, "diff")
+            user = (
+                f"# PR: {state['pr_title']}\n{note}\n"
+                f"{analyses}{existing_section}\n\n"
+                f"## diff (라인번호 주석 포함)\n```diff\n{diff_text}\n```"
+            )
+            raw = await llm.chat(system, user)
+            try:
+                return _extract_json(raw)
+            except (ValueError, json.JSONDecodeError):
+                log.warning("리뷰 JSON 파싱 실패 (배치 %d) — 복구 시도", idx + 1)
+                repaired = await llm.chat(prompts.JSON_REPAIR_SYSTEM, raw, temperature=0.0)
+                return _extract_json(repaired)
+
+        results = await asyncio.gather(*(one(b, i) for i, b in enumerate(batches)))
+
+        # 배치 결과 병합
+        summaries = [str(r.get("summary", "")).strip() for r in results if r.get("summary")]
+        if len(summaries) <= 1:
+            summary = summaries[0] if summaries else ""
+        else:
+            summary = await llm.chat(
+                prompts.MERGE_SUMMARY_SYSTEM.format(language=lang),
+                "\n\n---\n\n".join(summaries),
+            )
+        # 배치 간 완전 동일한 코멘트 중복 제거
+        comments: list[dict] = []
+        seen_comments: set = set()
+        for r in results:
+            for c in r.get("inline_comments") or []:
+                if not isinstance(c, dict):
+                    continue
+                key = (c.get("path"), c.get("line"),
+                       str(c.get("side", "RIGHT")).upper(), c.get("body"))
+                if key not in seen_comments:
+                    seen_comments.add(key)
+                    comments.append(c)
         ok, dropped = validate_comments(comments, state["valid_lines"])
         if dropped:
             log.warning("diff 밖 라인 지정 등으로 탈락한 인라인 코멘트 %d개", len(dropped))
-        log.info("compare_reviewer 완료: 인라인 %d개 (탈락 %d개)", len(ok), len(dropped))
+
+        # agreements 병합: 실재하는 comment_id만, id당 하나만
+        existing_ids = {c["id"]: c for c in state["existing_comments"]}
+        agreements: list[dict] = []
+        seen_ids: set = set()
+        for r in results:
+            for a in r.get("agreements") or []:
+                cid = a.get("comment_id") if isinstance(a, dict) else None
+                if cid in existing_ids and cid not in seen_ids and a.get("body"):
+                    seen_ids.add(cid)
+                    agreements.append({"comment_id": cid, "body": str(a["body"])})
+
+        log.info(
+            "compare_reviewer 완료 (배치 %d개): 인라인 %d개 (탈락 %d개), 기존 코멘트 동의 %d개",
+            len(batches), len(ok), len(dropped), len(agreements),
+        )
         return {
             "review_summary": summary,
             "inline_comments": ok,
             "dropped_comments": dropped,
+            "agreements": agreements,
         }
 
     # ---- node: post_summary (병렬 1) --------------------------------------
@@ -281,16 +363,52 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
             }
             for c in state["inline_comments"]
         ]
-        if not comments:
-            log.info("인라인 코멘트 없음 — 건너뜀")
-            return {"posted_inline": 0}
+        posted = 0
         if cfg.dry_run:
             for c in comments:
                 log.info("[DRY_RUN] 인라인 %s:%s(%s)\n%s", c["path"], c["line"], c["side"], c["body"])
-            return {"posted_inline": 0}
-        added = await gh.post_inline_review(comments, body="🤖 자동 리뷰 인라인 코멘트")
-        log.info("인라인 코멘트 %d/%d개 등록 완료", added, len(comments))
-        return {"posted_inline": added}
+        elif comments:
+            posted = await gh.post_inline_review(comments, body="🤖 자동 리뷰 인라인 코멘트")
+            log.info("인라인 코멘트 %d/%d개 등록 완료", posted, len(comments))
+        else:
+            log.info("인라인 코멘트 없음 — 건너뜀")
+
+        posted_agreements = await _post_agreements(state)
+        return {"posted_inline": posted, "posted_agreements": posted_agreements}
+
+    async def _post_agreements(state: ReviewState) -> int:
+        """기존 코멘트와 중복인 지적 → 해당 코멘트에 동의 답글.
+
+        인라인 코멘트 스레드에는 답글을 시도하고, 답글 미지원 서버이거나
+        대화(issue) 코멘트면 원문을 인용한 일반 코멘트로 fallback.
+        """
+        if not state["agreements"]:
+            return 0
+        by_id = {c["id"]: c for c in state["existing_comments"]}
+        posted = 0
+        fallbacks: list[str] = []
+        for a in state["agreements"]:
+            target = by_id[a["comment_id"]]
+            body = f"🤖 {a['body']}"
+            if cfg.dry_run:
+                log.info("[DRY_RUN] 기존 코멘트(id=%s, @%s)에 동의 답글:\n%s",
+                         a["comment_id"], target.get("user"), body)
+                continue
+            if target["type"] == "inline":
+                try:
+                    await gh.reply_to_review_comment(a["comment_id"], body)
+                    posted += 1
+                    continue
+                except Exception as e:
+                    log.warning("답글 등록 실패 (id=%s), 일반 코멘트로 대체: %s", a["comment_id"], e)
+            quote = target.get("body", "").replace("\n", " ")[:120]
+            fallbacks.append(f"> @{target.get('user')}: {quote}\n\n{body}")
+        if fallbacks:
+            await gh.add_issue_comment("\n\n---\n\n".join(fallbacks))
+            posted += len(fallbacks)
+        if posted:
+            log.info("기존 코멘트 동의 %d개 등록 완료", posted)
+        return posted
 
     # ---- graph wiring -----------------------------------------------------
 
@@ -338,6 +456,22 @@ def _candidate_rule_paths(changed_paths) -> list[str]:
 
 def _join_files(files: dict[str, str]) -> str:
     return "\n\n".join(f"### {path}\n```\n{content}\n```" for path, content in files.items())
+
+
+def _merge_parts(parts) -> str:
+    parts = [p for p in parts if p]
+    if len(parts) == 1:
+        return parts[0]
+    return "\n\n".join(f"### 파일 그룹 {i + 1}\n{p}" for i, p in enumerate(parts))
+
+
+def _format_existing_comments(comments: list[dict], limit: int) -> str:
+    lines = []
+    for c in comments:
+        loc = f" {c.get('path')}:{c.get('line')}" if c["type"] == "inline" else ""
+        body = (c.get("body") or "").replace("\n", " ")[:300]
+        lines.append(f"- [id={c['id']}] ({c['type']}{loc}, @{c.get('user', '')}) {body}")
+    return clip("\n".join(lines), limit, "기존 코멘트")
 
 
 def _extract_json(text: str) -> dict:
