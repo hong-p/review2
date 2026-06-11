@@ -1,8 +1,9 @@
 """GitOps PR 리뷰봇 엔트리포인트.
 
-Jenkins에서:
-    GITHUB_TOKEN, GITHUB_REPOSITORY, PR_NUMBER, LLM_BASE_URL, LLM_MODEL 설정 후
-    python main.py
+환경변수 또는 CLI 파라미터로 설정 (CLI 인자 우선):
+    python main.py --repo my-org/gitops --pr-number 123 \
+        --github-token ghp_xxx --llm-base-url http://llm:8000/v1 --llm-model qwen2.5
+전체 옵션: python main.py --help
 """
 import asyncio
 import logging

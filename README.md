@@ -47,30 +47,43 @@ fetch_pr (GitHub MCP)
 | `prompts.py` | 에이전트 3개 프롬프트 |
 | `RULE.example.md` | RULE.md 권장 포맷 예시 |
 
-## 환경변수
+## 설정
 
-| 변수 | 필수 | 설명 |
-|---|---|---|
-| `GITHUB_TOKEN` | ✅ | GitHub PAT (repo, PR 읽기/코멘트 권한) |
-| `GITHUB_REPOSITORY` | ✅ | `owner/repo` (또는 `REPO_OWNER` + `REPO_NAME`) |
-| `PR_NUMBER` | ✅ | 리뷰할 PR 번호 |
-| `LLM_BASE_URL` | ✅ | 로컬 LLM OpenAI-compatible 엔드포인트 (예: `http://llm:8000/v1`) |
-| `LLM_MODEL` | ✅ | 모델 이름 |
-| `LLM_API_KEY` | | 기본 `dummy` |
-| `GITHUB_MCP_CMD` | | MCP 서버 실행 커맨드. 기본: `docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server`. 바이너리가 있으면 `github-mcp-server stdio` |
-| `REVIEW_LANGUAGE` | | 리뷰 언어, 기본 `Korean` |
-| `DRY_RUN` | | `1`이면 GitHub에 게시하지 않고 로그로만 출력 |
+모든 값은 CLI 파라미터 또는 환경변수로 줄 수 있다. **CLI 인자 > 환경변수** 우선순위.
+
+| CLI 파라미터 | 환경변수 | 필수 | 설명 |
+|---|---|---|---|
+| `--github-token` | `GITHUB_TOKEN` | ✅ | GitHub PAT (repo, PR 읽기/코멘트 권한) |
+| `--repo` | `GITHUB_REPOSITORY` | ✅ | `owner/repo` (env는 `REPO_OWNER`+`REPO_NAME` 분리형도 허용) |
+| `--pr-number` | `PR_NUMBER` | ✅ | 리뷰할 PR 번호 |
+| `--llm-base-url` | `LLM_BASE_URL` | ✅ | 로컬 LLM OpenAI-compatible 엔드포인트 (예: `http://llm:8000/v1`) |
+| `--llm-model` | `LLM_MODEL` | ✅ | 모델 이름 |
+| `--llm-api-key` | `LLM_API_KEY` | | 기본 `dummy` |
+| `--mcp-cmd` | `GITHUB_MCP_CMD` | | MCP 서버 실행 커맨드. 기본: `docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server`. 바이너리가 있으면 `github-mcp-server stdio` |
+| `--language` | `REVIEW_LANGUAGE` | | 리뷰 언어, 기본 `Korean` |
+| `--dry-run` | `DRY_RUN=1` | | GitHub에 게시하지 않고 로그로만 출력 |
 
 ## 실행
 
 ```bash
 pip install -r requirements.txt
+
+# CLI 파라미터로
+python main.py \
+  --github-token ghp_xxx \
+  --repo my-org/gitops \
+  --pr-number 123 \
+  --llm-base-url http://localhost:8000/v1 \
+  --llm-model qwen2.5-32b-instruct \
+  --dry-run                # 먼저 dry-run으로 테스트 권장
+
+# 또는 환경변수로
 export GITHUB_TOKEN=ghp_xxx
 export GITHUB_REPOSITORY=my-org/gitops
 export PR_NUMBER=123
 export LLM_BASE_URL=http://localhost:8000/v1
 export LLM_MODEL=qwen2.5-32b-instruct
-python main.py          # DRY_RUN=1 python main.py 로 먼저 테스트 권장
+python main.py
 ```
 
 ## Jenkins 연동 예시
