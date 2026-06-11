@@ -6,11 +6,11 @@ LangGraph + GitHub MCP + 로컬 LLM(OpenAI-compatible)으로 GitOps 레포 PR을
 
 ```
 fetch_pr (GitHub MCP)
-    ↓  RULE.md 변경 여부 판단
+    ↓  REVIEW_RULE.md 변경 여부 판단
 ┌──────────────────┬──────────────────┐   ← 병렬
 [changed_analyzer] [base_analyzer]
  diff 분석          base 원본 분석
- + RULE.md(변경시)   + RULE.md(미변경시)
+ + REVIEW_RULE.md(변경시)   + REVIEW_RULE.md(미변경시)
 └──────────────────┴──────────────────┘
     ↓
 [compare_reviewer]  → JSON { summary, inline_comments[] }
@@ -21,14 +21,14 @@ fetch_pr (GitHub MCP)
  comment        flow
 ```
 
-- **RULE.md 분기**: PR에서 RULE.md가 변경됐으면 changed_analyzer가 head 버전을 읽고,
+- **REVIEW_RULE.md 분기**: PR에서 REVIEW_RULE.md가 변경됐으면 changed_analyzer가 head 버전을 읽고,
   변경 안 됐으면 base_analyzer가 변경 파일들의 상위 디렉토리를 거슬러 올라가며
-  base 브랜치의 RULE.md를 찾아 읽는다 (`gitops/lcm-manila/RULE.md` 등).
-- **참고 환경 교차 비교**: RULE.md에 `reference_environments` yaml 블록으로 환경 그룹을
+  base 브랜치의 REVIEW_RULE.md를 찾아 읽는다 (`gitops/lcm-manila/REVIEW_RULE.md` 등).
+- **참고 환경 교차 비교**: REVIEW_RULE.md에 `reference_environments` yaml 블록으로 환경 그룹을
   선언하면, 변경 파일 경로의 환경 세그먼트를 같은 그룹의 다른 환경으로 치환해
   **PR에서 변경되지 않은 대응 파일**도 읽어온다. base_analyzer가 환경 간 값을 비교해
   통일 여부 / 의도된 차이 여부를 분석하고, compare_reviewer가 리뷰에 반영한다.
-  포맷은 [RULE.example.md](RULE.example.md) 참고.
+  포맷은 [REVIEW_RULE.example.md](REVIEW_RULE.example.md) 참고.
 - **대형 PR 지원**: diff를 자르지 않는다. 호출당 예산(`max_diff_chars` 등)을 넘으면
   파일 단위 배치로 쪼개 LLM을 여러 번 호출(동시 `--llm-concurrency`개)하고,
   summary는 별도 병합 호출로, 인라인 코멘트는 중복 제거 후 합친다.
@@ -51,9 +51,9 @@ fetch_pr (GitHub MCP)
 | `github_mcp.py` | GitHub MCP stdio 클라이언트 래퍼 |
 | `llm.py` | OpenAI-compatible LLM 래퍼 |
 | `diff_utils.py` | diff 파싱, 라인번호 주석, 인라인 코멘트 검증 |
-| `rules.py` | RULE.md의 reference_environments 파싱, 대응 파일 경로 생성 |
+| `rules.py` | REVIEW_RULE.md의 reference_environments 파싱, 대응 파일 경로 생성 |
 | `prompts.py` | 에이전트 3개 프롬프트 |
-| `RULE.example.md` | RULE.md 권장 포맷 예시 |
+| `REVIEW_RULE.example.md` | REVIEW_RULE.md 권장 포맷 예시 |
 
 ## 설정
 

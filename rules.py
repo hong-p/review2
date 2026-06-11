@@ -1,6 +1,6 @@
-"""RULE.md 파싱 — 참고 환경(reference_environments) 설정.
+"""REVIEW_RULE.md 파싱 — 참고 환경(reference_environments) 설정.
 
-RULE.md는 자유 텍스트지만, yaml 코드블록으로 참고 환경 그룹을 선언할 수 있다:
+REVIEW_RULE.md는 자유 텍스트지만, yaml 코드블록으로 참고 환경 그룹을 선언할 수 있다:
 
     ```yaml
     reference_environments:
@@ -22,7 +22,7 @@ YAML_FENCE_RE = re.compile(r"```ya?ml\s*\n(.*?)```", re.S)
 
 
 def parse_env_groups(rule_texts: list[str]) -> list[list[str]]:
-    """RULE.md 본문들에서 참고 환경 그룹을 추출한다.
+    """REVIEW_RULE.md 본문들에서 참고 환경 그룹을 추출한다.
 
     지원 형식:
       reference_environments:        # 그룹 여러 개

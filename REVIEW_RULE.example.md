@@ -1,12 +1,12 @@
 # lcm-manila 리뷰 규칙
 
 <!--
-RULE.md 작성 가이드
+REVIEW_RULE.md 작성 가이드
 - 이 파일은 자유 텍스트다. 아래 섹션 구성은 권장 포맷일 뿐, 순서/제목은 바꿔도 된다.
 - 단, "참고 환경" 섹션의 yaml 코드블록(reference_environments)만은 봇이 직접 파싱하므로
   형식을 지켜야 한다.
-- 레포 루트 기준 gitops/lcm-manila/RULE.md 에 두면 하위 폴더 전체에 적용된다.
-  더 깊은 폴더에 RULE.md를 추가로 두면 그 폴더 변경 시 함께 읽힌다.
+- 레포 루트 기준 gitops/lcm-manila/REVIEW_RULE.md 에 두면 하위 폴더 전체에 적용된다.
+  더 깊은 폴더에 REVIEW_RULE.md를 추가로 두면 그 폴더 변경 시 함께 읽힌다.
 -->
 
 ## 참고 환경

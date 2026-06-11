@@ -28,7 +28,7 @@ from llm import LLM, clip
 
 log = logging.getLogger(__name__)
 
-RULE_FILENAME = "RULE.md"
+RULE_FILENAME = "REVIEW_RULE.md"
 SEVERITY_MARK = {"error": "🔴", "warn": "🟡", "info": "🔵"}
 ANALYSIS_BUDGET = 30_000  # reviewer에 전달하는 analyzer 결과물 상한 (각각)
 
@@ -44,7 +44,7 @@ class ReviewState(TypedDict, total=False):
     diff_by_file: dict[str, str]   # path → 해당 파일 diff (배치 처리용)
     valid_lines: dict              # {path: {"RIGHT": set, "LEFT": set}}
     rule_changed: bool
-    head_rules: dict[str, str]     # PR에서 RULE.md가 변경된 경우 head 버전
+    head_rules: dict[str, str]     # PR에서 REVIEW_RULE.md가 변경된 경우 head 버전
     base_rules: dict[str, str]     # 변경 안 된 경우 base 버전
     base_files: dict[str, str]     # 변경된 파일들의 base 원본
     peer_map: dict[str, list[str]]  # 변경 파일 → 참고 환경 대응 파일 경로
@@ -85,7 +85,7 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
         valid_lines, annotated_diff = parse_diff(diff)
         diff_by_file = split_diff_by_file(annotated_diff)
 
-        # --- RULE.md 변경 여부 분기 ---
+        # --- REVIEW_RULE.md 변경 여부 분기 ---
         rule_paths_in_pr = [
             f["path"] for f in changed if posixpath.basename(f["path"]) == RULE_FILENAME
         ]
@@ -100,14 +100,14 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
                 if content:
                     head_rules[p] = clip(content, cfg.max_file_chars, p)
         else:
-            # 변경 안 됐으면 → base_analyzer가 기존 RULE.md를 읽는다.
-            # 변경 파일들의 상위 디렉토리를 거슬러 올라가며 RULE.md를 찾는다.
+            # 변경 안 됐으면 → base_analyzer가 기존 REVIEW_RULE.md를 읽는다.
+            # 변경 파일들의 상위 디렉토리를 거슬러 올라가며 REVIEW_RULE.md를 찾는다.
             for rule_path in _candidate_rule_paths(c["path"] for c in changed):
                 content = await gh.get_file_contents(rule_path, base_sha)
                 if content:
                     base_rules[rule_path] = clip(content, cfg.max_file_chars, rule_path)
 
-        # --- 참고 환경 교차 비교: RULE.md의 reference_environments 기반 ---
+        # --- 참고 환경 교차 비교: REVIEW_RULE.md의 reference_environments 기반 ---
         rule_texts = list(head_rules.values()) + list(base_rules.values())
         env_groups = rules.parse_env_groups(rule_texts)
         peer_map = (
@@ -142,7 +142,7 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
                 base_files[f["path"]] = clip(content, cfg.max_file_chars, f["path"])
 
         log.info(
-            "PR #%s: 파일 %d개 (diff %d자), RULE.md 변경=%s, 기존 코멘트 %d개",
+            "PR #%s: 파일 %d개 (diff %d자), REVIEW_RULE.md 변경=%s, 기존 코멘트 %d개",
             cfg.pr_number, len(changed), len(diff), rule_changed, len(existing_comments),
         )
         return {
@@ -169,7 +169,7 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
     async def changed_analyzer(state: ReviewState) -> ReviewState:
         rule_section = ""
         if state["rule_changed"]:
-            rule_section = "\n\n## 이번 PR에서 변경된 RULE.md (head 버전)\n" + _join_files(
+            rule_section = "\n\n## 이번 PR에서 변경된 REVIEW_RULE.md (head 버전)\n" + _join_files(
                 state["head_rules"]
             )
         system = prompts.CHANGED_ANALYZER_SYSTEM.format(language=lang)
@@ -198,7 +198,7 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
     async def base_analyzer(state: ReviewState) -> ReviewState:
         rule_section = ""
         if not state["rule_changed"] and state["base_rules"]:
-            rule_section = "\n\n## 기존 RULE.md (base 버전)\n" + _join_files(
+            rule_section = "\n\n## 기존 REVIEW_RULE.md (base 버전)\n" + _join_files(
                 state["base_rules"]
             )
         changed_list = "\n".join(
@@ -435,9 +435,9 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
 
 
 def _candidate_rule_paths(changed_paths) -> list[str]:
-    """변경 파일들의 모든 상위 디렉토리에서 RULE.md 후보 경로를 만든다.
+    """변경 파일들의 모든 상위 디렉토리에서 REVIEW_RULE.md 후보 경로를 만든다.
     예: gitops/lcm-manila/helm/values.yaml
-        → gitops/lcm-manila/helm/RULE.md, gitops/lcm-manila/RULE.md, gitops/RULE.md, RULE.md
+        → gitops/lcm-manila/helm/REVIEW_RULE.md, gitops/lcm-manila/REVIEW_RULE.md, gitops/REVIEW_RULE.md, REVIEW_RULE.md
     """
     candidates: list[str] = []
     seen: set[str] = set()
