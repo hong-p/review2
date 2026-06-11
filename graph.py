@@ -13,6 +13,7 @@ from typing import TypedDict
 from langgraph.graph import END, START, StateGraph
 
 import prompts
+import rules
 from config import Config
 from diff_utils import parse_diff, validate_comments
 from github_mcp import GitHubMCP
@@ -37,6 +38,9 @@ class ReviewState(TypedDict, total=False):
     head_rules: dict[str, str]     # PR에서 RULE.md가 변경된 경우 head 버전
     base_rules: dict[str, str]     # 변경 안 된 경우 base 버전
     base_files: dict[str, str]     # 변경된 파일들의 base 원본
+    peer_map: dict[str, list[str]]  # 변경 파일 → 참고 환경 대응 파일 경로
+    peer_files: dict[str, str]      # 참고 환경 대응 파일 내용 (변경되지 않은 파일)
+    missing_peers: list[str]        # 참고 환경에 존재하지 않는 대응 파일
     # analyzer 결과 (병렬 — 서로 다른 키에 기록)
     changed_analysis: str
     base_analysis: str
@@ -89,6 +93,38 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
                 if content:
                     base_rules[rule_path] = clip(content, cfg.max_file_chars, rule_path)
 
+        # --- 참고 환경 교차 비교: RULE.md의 reference_environments 기반 ---
+        # 예: dev2/deployment.yaml 변경 → 같은 그룹의 qa2/deployment.yaml(미변경)도 읽는다
+        rule_texts = list(head_rules.values()) + list(base_rules.values())
+        env_groups = rules.parse_env_groups(rule_texts)
+        peer_map = (
+            rules.find_peer_paths([c["path"] for c in changed], env_groups)
+            if env_groups
+            else {}
+        )
+        peer_files: dict[str, str] = {}
+        missing_peers: list[str] = []
+        peer_total = 0
+        for src, peer_paths in peer_map.items():
+            for p in peer_paths:
+                if p in peer_files or p in missing_peers:
+                    continue
+                if peer_total >= cfg.max_peer_total_chars:
+                    log.warning("참고 환경 파일 수집 상한 도달, 이후 생략: %s", p)
+                    break
+                content = await gh.get_file_contents(p, head_sha)
+                if content is None:
+                    missing_peers.append(p)
+                else:
+                    content = clip(content, cfg.max_file_chars, p)
+                    peer_files[p] = content
+                    peer_total += len(content)
+        if env_groups:
+            log.info(
+                "참고 환경 그룹 %s → 대응 파일 %d개 수집, %d개 없음",
+                env_groups, len(peer_files), len(missing_peers),
+            )
+
         # --- 변경 파일들의 base 원본 수집 (신규 파일 제외) ---
         base_files: dict[str, str] = {}
         total = 0
@@ -120,6 +156,9 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
             "head_rules": head_rules,
             "base_rules": base_rules,
             "base_files": base_files,
+            "peer_map": peer_map,
+            "peer_files": peer_files,
+            "missing_peers": missing_peers,
         }
 
     # ---- node: changed_analyzer (병렬 1) --------------------------------
@@ -152,11 +191,28 @@ def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
         changed_list = "\n".join(
             f"- {f['path']} ({f['status']})" for f in state["changed_files"]
         )
+        peer_section = ""
+        if state["peer_map"]:
+            mapping = "\n".join(
+                f"- {src}\n" + "\n".join(f"  - 비교 대상: {p}" for p in peers)
+                for src, peers in state["peer_map"].items()
+            )
+            missing = ""
+            if state["missing_peers"]:
+                missing = "\n존재하지 않는 대응 파일 (환경 간 파일 구성 불일치 가능성):\n" + "\n".join(
+                    f"- {p}" for p in state["missing_peers"]
+                )
+            peer_section = (
+                f"\n\n## 참고 환경 대응 파일 (이번 PR에서 변경되지 않음)\n"
+                f"변경 파일과 비교해야 할 다른 환경의 파일들이다.\n{mapping}\n{missing}\n\n"
+                f"{_join_files(state['peer_files'])}"
+            )
         user = (
             f"# PR: {state['pr_title']}\n\n"
             f"## 이번 PR에서 변경된 파일 목록\n{changed_list}\n"
             f"{rule_section}\n\n"
             f"## 변경 전(base) 원본 파일\n{_join_files(state['base_files']) or '(전부 신규 파일)'}"
+            f"{peer_section}"
         )
         analysis = await llm.chat(
             prompts.BASE_ANALYZER_SYSTEM.format(language=lang), user

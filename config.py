@@ -26,6 +26,7 @@ class Config:
     max_diff_chars: int = 60_000
     max_file_chars: int = 20_000
     max_base_total_chars: int = 80_000
+    max_peer_total_chars: int = 60_000
 
 
 def load_config() -> Config:
