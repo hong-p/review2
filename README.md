@@ -2,24 +2,78 @@
 
 LangGraph + GitHub MCP + 로컬 LLM(OpenAI-compatible)으로 GitOps 레포 PR을 자동 리뷰한다.
 
-## 구조
+## LangGraph 파이프라인 구조
 
+노드 6개를 가진 `StateGraph` 하나로 구성된다. 전체 정의는 [graph.py](graph.py)의 `build_graph()`.
+
+```mermaid
+graph TD
+    START([START]) --> fetch_pr
+    fetch_pr["fetch_pr<br/><i>GitHub MCP로 PR 데이터 수집</i>"]
+    fetch_pr --> changed_analyzer["changed_analyzer (LLM)<br/><i>diff 분석<br/>+ 룰(PR에서 변경된 경우)</i>"]
+    fetch_pr --> base_analyzer["base_analyzer (LLM)<br/><i>base 원본 + 참고 환경 분석<br/>+ 룰(변경 안 된 경우)</i>"]
+    changed_analyzer --> compare_reviewer
+    base_analyzer --> compare_reviewer
+    compare_reviewer["compare_reviewer (LLM)<br/><i>두 분석 종합 → JSON<br/>{summary, inline_comments, agreements}</i>"]
+    compare_reviewer --> post_summary["post_summary<br/><i>PR 전체 코멘트 등록</i>"]
+    compare_reviewer --> post_inline["post_inline<br/><i>인라인 코멘트 + 동의 답글 등록</i>"]
+    post_summary --> END([END])
+    post_inline --> END
 ```
-fetch_pr (GitHub MCP)
-    ↓  REVIEW_RULE.md 변경 여부 판단
-┌──────────────────┬──────────────────┐   ← 병렬
-[changed_analyzer] [base_analyzer]
- diff 분석          base 원본 분석
- + REVIEW_RULE.md(변경시)   + REVIEW_RULE.md(미변경시)
-└──────────────────┴──────────────────┘
-    ↓
-[compare_reviewer]  → JSON { summary, inline_comments[] }
-    ↓
-┌──────────────┬──────────────┐   ← 병렬
-[PR 전체 코멘트] [인라인 코멘트]
- add_issue_     pending review
- comment        flow
+
+### 왜 LangGraph인가
+
+흐름이 단순 직선이면 프레임워크 없이 함수 호출로 충분하다. 이 파이프라인은
+**병렬 구간이 두 번** 있어서 LangGraph의 fan-out/join이 실질적인 가치를 갖는다:
+
+1. 분석 단계 — changed_analyzer와 base_analyzer는 서로 입력이 독립적(diff vs base 원본)이라 동시 실행
+2. 게시 단계 — 전체 코멘트와 인라인 코멘트는 서로 다른 GitHub API라 동시 실행
+
+### 병렬 실행과 join의 동작 원리
+
+```python
+g.add_edge("fetch_pr", "changed_analyzer")   # ┐ fetch_pr가 끝나면
+g.add_edge("fetch_pr", "base_analyzer")      # ┘ 두 노드가 동시에 시작 (fan-out)
+g.add_edge(["changed_analyzer", "base_analyzer"], "compare_reviewer")  # join
 ```
+
+- 한 노드에서 나가는 edge가 2개면 LangGraph가 같은 superstep에서 두 노드를 **동시에** 실행한다.
+- `add_edge([a, b], c)` 형태의 join은 a, b가 **둘 다 끝나야** c를 시작한다.
+- 병렬 노드들이 같은 State를 동시에 쓰면 충돌이 나므로, 각 노드는 **서로 다른 키에만 기록**한다
+  (changed_analyzer→`changed_analysis`, base_analyzer→`base_analysis`,
+  post_summary→`posted_summary`, post_inline→`posted_inline`/`posted_agreements`).
+  덕분에 reducer 없이 기본 State 병합으로 충분하다.
+
+### ReviewState — 노드 간 데이터 흐름
+
+State는 `TypedDict`이며, 각 노드는 입력으로 전체 State를 받고 자신이 만든 키만 반환한다.
+
+| 키 | 쓰는 노드 | 읽는 노드 | 내용 |
+|---|---|---|---|
+| `annotated_diff`, `diff_by_file`, `valid_lines` | fetch_pr | analyzer/reviewer, reviewer 검증 | 라인번호(R/L) 주석 diff, 파일별 분할본, 코멘트 가능 라인 집합 |
+| `rule_changed`, `head_rules`, `base_rules` | fetch_pr | changed/base_analyzer | REVIEW_RULE.md 분기 결과 |
+| `base_files`, `peer_map`, `peer_files`, `missing_peers` | fetch_pr | base_analyzer | base 원본, 참고 환경 대응 파일 |
+| `existing_comments` | fetch_pr | compare_reviewer, post_inline | 이미 달린 코멘트 (중복 방지용) |
+| `changed_analysis` / `base_analysis` | 각 analyzer | compare_reviewer | 분석 결과 텍스트 |
+| `review_summary`, `inline_comments`, `dropped_comments`, `agreements` | compare_reviewer | post_summary, post_inline | 최종 리뷰 (검증 완료) |
+| `posted_*` | post 노드들 | main.py | 등록 결과 집계 |
+
+### 노드별 역할 요약
+
+| 노드 | LLM 호출 | 하는 일 |
+|---|---|---|
+| `fetch_pr` | ✗ | PR 메타/diff/파일/기존 코멘트 수집, REVIEW_RULE.md 분기, 참고 환경 peer 수집, diff 파싱·라인번호 주석 |
+| `changed_analyzer` | ✓ (배치 N회) | "무엇이 바뀌었나" — diff 분석, 룰이 PR에서 변경됐으면 head 룰 기준 평가 |
+| `base_analyzer` | ✓ (배치 N회) | "원래 어땠나" — base 원본·컨벤션 분석, 기존 룰 매핑, 참고 환경 간 통일 여부 비교 |
+| `compare_reviewer` | ✓ (배치 N회 + 병합 1회) | 두 분석 비교·종합, 구조화 JSON 출력, 인라인 라인 검증, 기존 코멘트와 중복 분리(agreements) |
+| `post_summary` | ✗ | summary + 탈락 코멘트를 PR 전체 코멘트로 등록 |
+| `post_inline` | ✗ | pending review 흐름으로 인라인 코멘트 등록 + 기존 코멘트 동의 답글 |
+
+배치 처리(대형 PR)는 **그래프 구조가 아니라 노드 내부**에서 일어난다 — LLM을 쓰는 노드가
+입력이 호출당 예산을 넘으면 `asyncio.gather`로 배치를 병렬 호출하고 결과를 병합해서
+하나의 State 키로 반환한다. 그래프 토폴로지는 PR 크기와 무관하게 항상 동일하다.
+
+## 동작 특징
 
 - **REVIEW_RULE.md 분기**: PR에서 REVIEW_RULE.md가 변경됐으면 changed_analyzer가 head 버전을 읽고,
   변경 안 됐으면 base_analyzer가 변경 파일들의 상위 디렉토리를 거슬러 올라가며
@@ -41,19 +95,22 @@ fetch_pr (GitHub MCP)
   LLM이 지정한 (path, line, side)가 실제 diff 안에 있는지 검증한다.
   검증 실패한 코멘트는 PR 전체 코멘트 하단에 "기타 지적"으로 합쳐진다.
 
-## 파일
+## 파일 구성
 
-| 파일 | 역할 |
-|---|---|
-| `main.py` | 엔트리포인트 |
-| `config.py` | 환경변수 로딩 |
-| `graph.py` | LangGraph 노드 6개 + 와이어링 |
-| `github_mcp.py` | GitHub MCP stdio 클라이언트 래퍼 |
-| `llm.py` | OpenAI-compatible LLM 래퍼 |
-| `diff_utils.py` | diff 파싱, 라인번호 주석, 인라인 코멘트 검증 |
-| `rules.py` | REVIEW_RULE.md의 reference_environments 파싱, 대응 파일 경로 생성 |
-| `prompts.py` | 에이전트 3개 프롬프트 |
-| `REVIEW_RULE.example.md` | REVIEW_RULE.md 권장 포맷 예시 |
+`graph.py`가 중심이고 나머지는 그래프 노드들이 쓰는 도구다. LangChain은 쓰지 않는다
+(LLM은 openai SDK 직접 호출, GitHub은 mcp SDK 직접 호출).
+
+| 파일 | 역할 | 의존 |
+|---|---|---|
+| `main.py` | 엔트리포인트 — MCP 세션을 열고 그래프를 1회 실행 | config, github_mcp, graph, llm |
+| `graph.py` | **파이프라인 본체** — 노드 6개 정의 + 와이어링, 배치 처리, JSON 파싱/검증 | 아래 전부 |
+| `config.py` | CLI 인자/환경변수 → `Config` (호출당 예산, 타임아웃 등 튜닝값 포함) | — |
+| `github_mcp.py` | GitHub MCP stdio 클라이언트 래퍼 — 툴 이름은 상단 `TOOLS` 딕셔너리에 집중 | mcp SDK |
+| `llm.py` | OpenAI-compatible LLM 래퍼 — 타임아웃/재시도/동시성 제한 | openai SDK |
+| `diff_utils.py` | diff 파싱·라인번호 주석, 파일 단위 분할, 배치 패킹, 인라인 코멘트 검증 | — |
+| `rules.py` | REVIEW_RULE.md의 `reference_environments` 파싱, 참고 환경 경로 생성 | pyyaml |
+| `prompts.py` | 에이전트 3개 + JSON 복구 + summary 병합 프롬프트 | — |
+| `REVIEW_RULE.example.md` | 룰 파일 권장 포맷 예시 | — |
 
 ## 설정
 
