@@ -88,14 +88,17 @@ def build_graph(gh: GitHubAPI, llm: LLM, cfg: Config):
         # REVIEW_RULE.md의 environment_checks로 비교 대상 환경/파일을 결정론적으로 산출
         rule_texts = _read_rule_files(cfg.repo_dir, changed)
         checks = parse_environment_checks(rule_texts)
-        comparisons, peer_paths = resolve_comparisons([c["path"] for c in changed], checks)
-        env_directive = build_directive(comparisons, peer_paths)
+        comparisons, peer_paths, unresolved = resolve_comparisons(
+            [c["path"] for c in changed], checks, cfg.repo_dir,
+        )
+        env_directive = build_directive(comparisons, peer_paths, unresolved)
         ctx_holder["env_directive"] = env_directive
 
         log.info(
-            "PR #%s: 파일 %d개, 기존 코멘트 %d개, 환경 비교 규칙 %d개 → 비교환경 %s",
+            "PR #%s: 파일 %d개, 기존 코멘트 %d개, 환경 비교 규칙 %d개 → 비교환경 %s%s",
             cfg.pr_number, len(changed), len(existing), len(checks),
             {k: v for k, v in comparisons.items()} or "(없음)",
+            f" (LLM 보완 필요: {unresolved})" if unresolved else "",
         )
         return {
             "pr_title": pr.get("title", ""),
