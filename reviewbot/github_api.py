@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 
-from config import Config
+from .config import Config
 
 log = logging.getLogger(__name__)
 

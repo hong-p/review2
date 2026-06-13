@@ -1,7 +1,7 @@
 """로컬 fs 도구 · 레포 트리."""
 from conftest import make_repo
 
-from tools import ToolContext, build_repo_tree, execute_tool
+from reviewbot.tools import ToolContext, build_repo_tree, execute_tool
 
 BASE = "gitops/lcm-manila/kustomize/overlay"
 

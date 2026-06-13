@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from conftest import base_cfg
 
-from llm import LLM
+from reviewbot.llm import LLM
 
 
 class _FakeCompletions:
@@ -30,7 +30,7 @@ def _llm(comp, **cfg_kw):
 async def test_debug_logs_request_and_response(caplog):
     comp = _FakeCompletions(content="이것은 응답")
     llm = _llm(comp, log_level="DEBUG")
-    with caplog.at_level(logging.DEBUG, logger="llm"):
+    with caplog.at_level(logging.DEBUG, logger="reviewbot.llm"):
         await llm.chat("시스템", "유저질문입니다", tag="planner")
     text = caplog.text
     assert "[planner] → LLM 요청" in text and "[planner] ← LLM 응답" in text
@@ -39,7 +39,7 @@ async def test_debug_logs_request_and_response(caplog):
 
 async def test_info_level_hides_request_body(caplog):
     llm = _llm(_FakeCompletions(), log_level="INFO")
-    with caplog.at_level(logging.INFO, logger="llm"):
+    with caplog.at_level(logging.INFO, logger="reviewbot.llm"):
         await llm.chat("시스템", "유저", tag="planner")
     assert "→ LLM 요청" not in caplog.text
 
@@ -47,7 +47,7 @@ async def test_info_level_hides_request_body(caplog):
 async def test_tool_calls_logged_with_tag(caplog):
     comp = _FakeCompletions(with_tool=True)
     llm = _llm(comp, log_level="DEBUG")
-    with caplog.at_level(logging.DEBUG, logger="llm"):
+    with caplog.at_level(logging.DEBUG, logger="reviewbot.llm"):
         await llm.chat_with_tools(
             [{"role": "system", "content": "S"}, {"role": "user", "content": "분석"}],
             tools=[{"type": "function"}], tag="agent[helm] turn 2",

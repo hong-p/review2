@@ -9,10 +9,10 @@ import asyncio
 import logging
 import sys
 
-from config import load_config
-from github_api import github_api
-from graph import build_graph
-from llm import LLM
+from .config import load_config
+from .github_api import github_api
+from .graph import build_graph
+from .llm import LLM
 
 log = logging.getLogger("review-bot")
 

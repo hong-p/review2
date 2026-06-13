@@ -1,5 +1,5 @@
 """diff 파싱 · 라인번호 주석 · 인라인 코멘트 검증."""
-from diff_utils import parse_diff, split_diff_by_file, validate_comments
+from reviewbot.diff_utils import parse_diff, split_diff_by_file, validate_comments
 
 DIFF = """diff --git a/gitops/f.yaml b/gitops/f.yaml
 --- a/gitops/f.yaml

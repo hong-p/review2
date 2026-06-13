@@ -120,18 +120,22 @@ g.add_edge("agent", "aggregator")                                # 모두 끝나
 
 ## 파일 구성
 
-| 파일 | 역할 |
+소스는 `reviewbot/` 패키지에 있고, `python -m reviewbot`으로 실행한다.
+
+| 모듈 | 역할 |
 |---|---|
-| `main.py` | 엔트리포인트 |
-| `graph.py` | LangGraph 파이프라인 (planner → fan-out → agents → aggregator → 게시) |
-| `agent.py` | **tool use loop** — 에이전트 1개를 도구 호출이 멈출 때까지 구동 |
-| `tools.py` | 로컬 fs 도구 + native function calling 스키마 + 실행 디스패처 |
-| `llm.py` | OpenAI-compatible 래퍼 (`chat`, `chat_with_tools`, thinking 제어) |
-| `github_api.py` | GitHub REST API (httpx) — PR 메타 조회와 게시 전용 (파일 읽기는 로컬 도구가 담당) |
-| `diff_utils.py` | diff 파싱·라인번호 주석, 파일 단위 분할, 인라인 코멘트 검증 |
-| `prompts.py` | planner / agent / aggregator 프롬프트 |
-| `config.py` | CLI 인자/환경변수 |
-| `REVIEW_RULE.example.md` | 룰 파일 권장 포맷 예시 (에이전트가 read해서 참고) |
+| `reviewbot/__main__.py` | 엔트리포인트 (`python -m reviewbot`) |
+| `reviewbot/graph.py` | LangGraph 파이프라인 (planner → fan-out → agents → aggregator → 게시) |
+| `reviewbot/agent.py` | **tool use loop** — 에이전트 1개를 도구 호출이 멈출 때까지 구동 |
+| `reviewbot/tools.py` | 로컬 fs 도구 + native function calling 스키마 + 레포 트리 |
+| `reviewbot/llm.py` | OpenAI-compatible 래퍼 (`chat`, `chat_with_tools`, thinking 제어, 로깅) |
+| `reviewbot/github_api.py` | GitHub REST API (httpx) — PR 메타 조회와 게시 전용 |
+| `reviewbot/diff_utils.py` | diff 파싱·라인번호 주석, 파일 단위 분할, 인라인 코멘트 검증 |
+| `reviewbot/env_rules.py` | environment_checks 파싱 + 비교 대상 산출 (표기 불일치 매칭) |
+| `reviewbot/prompts.py` | planner / agent / aggregator 프롬프트 |
+| `reviewbot/config.py` | CLI 인자/환경변수 |
+| `tests/` | pytest 회귀 테스트 (단위 + 통합) |
+| `REVIEW_RULE.example.md` | 룰 파일 권장 포맷 예시 |
 
 ## 설정
 
@@ -175,7 +179,7 @@ pytest tests/test_env_rules.py -v
 pip install -r requirements.txt
 
 # Jenkins에서 PR 브랜치를 체크아웃한 워크스페이스에서 실행
-python main.py \
+python -m reviewbot \
   --github-token ghp_xxx \
   --repo my-org/gitops \
   --pr-number 123 \
@@ -216,6 +220,6 @@ GitHub 연동은 MCP(docker/stdio) 대신 [github_api.py](github_api.py)에서 *
 ## 참고
 
 - 로컬 LLM이 **native function calling(tools 파라미터)** 을 지원해야 한다 (Qwen3.6 등 지원).
-  서버가 thinking을 강제하거나 tools를 미지원하면 `llm.py`에서 조정이 필요할 수 있다.
+  서버가 thinking을 강제하거나 tools를 미지원하면 `reviewbot/llm.py`에서 조정이 필요할 수 있다.
 - 게이트웨이 타임아웃이 계속 발생하면: thinking이 꺼졌는지(`<think>` 블록 유무), 도구 결과 상한
   (`max_tool_result_chars`)을 더 줄였는지, 스트리밍/프록시 버퍼링 설정을 확인한다.

@@ -5,7 +5,7 @@ import httpx
 import pytest
 from conftest import base_cfg
 
-from github_api import GitHubAPI
+from reviewbot.github_api import GitHubAPI
 
 
 def _client(handler):

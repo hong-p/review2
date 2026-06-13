@@ -1,7 +1,7 @@
 """environment_checks 파싱 · 비교 대상 산출 · 표기 불일치 매칭."""
 from conftest import make_repo
 
-from env_rules import build_directive, parse_environment_checks, resolve_comparisons
+from reviewbot.env_rules import build_directive, parse_environment_checks, resolve_comparisons
 
 RULE = """# 룰
 ```yaml

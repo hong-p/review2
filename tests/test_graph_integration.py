@@ -3,7 +3,7 @@ import json
 
 from conftest import FakeGH, FakeMsg, FakeToolCall, ScriptedLLM, base_cfg, make_repo
 
-from graph import build_graph
+from reviewbot.graph import build_graph
 
 BASE = "gitops/lcm-manila/kustomize/overlay"
 

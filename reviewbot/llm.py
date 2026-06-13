@@ -21,7 +21,7 @@ import time
 
 from openai import AsyncOpenAI
 
-from config import Config
+from .config import Config
 
 log = logging.getLogger(__name__)
 

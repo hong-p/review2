@@ -21,14 +21,14 @@ from typing import Annotated, TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
-import prompts
-from agent import run_agent
-from config import Config
-from diff_utils import parse_diff, split_diff_by_file, validate_comments
-from env_rules import build_directive, parse_environment_checks, resolve_comparisons
-from github_api import GitHubAPI
-from llm import LLM, clip
-from tools import ToolContext, build_repo_tree
+from . import prompts
+from .agent import run_agent
+from .config import Config
+from .diff_utils import parse_diff, split_diff_by_file, validate_comments
+from .env_rules import build_directive, parse_environment_checks, resolve_comparisons
+from .github_api import GitHubAPI
+from .llm import LLM, clip
+from .tools import ToolContext, build_repo_tree
 
 RULE_FILENAME = "REVIEW_RULE.md"
 

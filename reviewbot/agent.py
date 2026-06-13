@@ -17,9 +17,9 @@
 import json
 import logging
 
-import prompts
-from llm import LLM
-from tools import TOOL_SCHEMAS, ToolContext, execute_tool
+from . import prompts
+from .llm import LLM
+from .tools import TOOL_SCHEMAS, ToolContext, execute_tool
 
 log = logging.getLogger(__name__)
 
