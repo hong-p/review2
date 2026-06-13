@@ -158,6 +158,17 @@ CLI 파라미터 또는 환경변수. **CLI 인자 > 환경변수** 우선순위
 | `--language` | `REVIEW_LANGUAGE` | | 리뷰 언어, 기본 Korean |
 | `--dry-run` | `DRY_RUN=1` | | 게시하지 않고 로그로만 |
 
+## 테스트
+
+```bash
+pip install -r requirements-dev.txt
+pytest                      # 전체 (단위 + 통합, 외부 의존성 없음)
+pytest tests/test_env_rules.py -v
+```
+
+단위(diff/env_rules/tools/github_api/llm) + 통합(tool use loop, 멀티에이전트 분할,
+인라인/통합 분리, 환경 비교, 리뷰 포맷, fallback)을 Fake LLM/GitHub로 검증한다.
+
 ## 실행
 
 ```bash
