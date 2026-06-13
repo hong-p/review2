@@ -3,25 +3,12 @@
 <!--
 REVIEW_RULE.md 작성 가이드
 - 이 파일은 자유 텍스트다. 아래 섹션 구성은 권장 포맷일 뿐, 순서/제목은 바꿔도 된다.
-- 단, "참고 환경" 섹션의 yaml 코드블록(reference_environments)만은 봇이 직접 파싱하므로
-  형식을 지켜야 한다.
+- 단, "환경 비교" 섹션의 environment_checks yaml 코드블록은 봇이 직접 파싱하므로 형식을 지킨다.
 - 레포 루트 기준 gitops/lcm-manila/REVIEW_RULE.md 에 두면 하위 폴더 전체에 적용된다.
   더 깊은 폴더에 REVIEW_RULE.md를 추가로 두면 그 폴더 변경 시 함께 읽힌다.
 -->
 
-## 참고 환경
-
-### 방식 1: reference_environments (대칭 그룹)
-
-같은 그룹에 속한 환경들은 설정이 통일되어야 한다. 한 환경이 변경되면 같은 그룹의 다른 환경과 비교한다.
-
-```yaml
-reference_environments:
-  - [dev, dev2, qa2]
-  - [prd-a, prd-b, prd-c]
-```
-
-### 방식 2: environment_checks (비대칭 단방향 — 승급 파이프라인용)
+## 환경 비교 (environment_checks)
 
 `changed`의 환경이 PR에서 변경되면, `compare_with`의 환경들과 비교한다.
 상위 환경일수록 더 많은 하위 환경과 대조하도록 누적해서 적는다 (검증된 값이 올라와야 하므로).
@@ -37,8 +24,10 @@ environment_checks:
     compare_with: [dev2-kr-west1, dev2-kr-west2, qa2-kr-west1, qa2-kr-west2]
 ```
 
-- 환경 이름은 디렉토리 세그먼트와 정확히 일치해야 한다 (`overlay/dev2-kr-west1/...`).
-- 비교는 같은 파일의 같은 위치 환경만 치환해 대조한다 (`dev2-kr-west1/x.yaml` ↔ `lcm3-kr-west1/x.yaml`).
+- 환경명은 실제 디렉토리와 표기가 달라도 된다 — 봇이 정규화 매칭으로 잇는다
+  (룰 `dev2-kr-west1` ↔ 실제 `dev2`). 못 맞추면 에이전트가 glob/list_dir로 찾아 보완한다.
+- 비교는 같은 파일의 환경 위치만 치환해 대조한다 (`dev2/x.yaml` ↔ `lcm3/x.yaml`).
+- 대칭 비교(A↔B 양쪽 모두 통일)가 필요하면 `changed`/`compare_with`에 서로를 넣어 양방향으로 적는다.
 
 ## 공통 규칙
 

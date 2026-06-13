@@ -181,20 +181,19 @@ python main.py \
 ## REVIEW_RULE.md (서비스별 규칙)
 
 각 서비스 디렉토리(`gitops/lcm-manila/`, `gitops/lcm-cinder/` 등)에 두면, 그 서비스를
-담당하는 에이전트가 `read_file`로 읽어 규칙을 적용한다. 자유 텍스트지만 `reference_environments`
-같은 환경 그룹 선언을 넣으면 환경 비교 기준으로 삼는다. 포맷은 [REVIEW_RULE.example.md](REVIEW_RULE.example.md) 참고.
+담당하는 에이전트가 `read_file`로 읽어 규칙을 적용한다. 자유 텍스트지만 `environment_checks`
+yaml 블록은 봇이 직접 파싱한다. 포맷은 [REVIEW_RULE.example.md](REVIEW_RULE.example.md) 참고.
 
 **여러 서비스가 한 PR에 섞이면** planner가 레포 트리에서 각 서비스의 REVIEW_RULE.md를 보고
 **서비스별로 에이전트를 나눈다.** lcm-manila 담당 에이전트는 `lcm-manila/REVIEW_RULE.md`를,
 lcm-cinder 담당은 `lcm-cinder/REVIEW_RULE.md`를 각각 적용해 룰이 섞이지 않는다.
 
-### 환경 비교 (두 방식)
+### 환경 비교 (environment_checks)
 
-- **`reference_environments`** — 대칭 그룹. 그룹 내 환경끼리 통일돼야 함.
-- **`environment_checks`** — 비대칭 단방향(승급 파이프라인). `changed`가 변경되면 `compare_with`와 비교.
-  상위 환경(prd)일수록 더 많은 하위 환경(dev/qa)과 대조. **코드가** [env_rules.py](env_rules.py)에서
-  변경 환경을 감지해 비교 대상 파일 경로를 결정론적으로 계산하고, **에이전트가** 그 파일들을 읽어 값을 대조한다.
-  (LLM이 환경 매핑을 추정하지 않으므로 정확하다.)
+`changed`가 변경되면 `compare_with`와 비교하는 비대칭 단방향 매핑(승급 파이프라인).
+상위 환경(prd)일수록 더 많은 하위 환경(dev/qa)과 대조한다. **코드가** [env_rules.py](env_rules.py)에서
+변경 환경을 감지하고 비교 대상 파일 경로를 결정론적으로 계산하며(환경명 표기가 달라도 정규화 매칭),
+**에이전트가** 그 파일들을 읽어 값을 대조한다. 코드가 못 맞춘 환경은 에이전트가 glob/list_dir로 보완한다.
 
 ## GitHub: MCP 대신 REST API
 

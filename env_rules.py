@@ -11,7 +11,7 @@
     ```
 
 PR에서 changed 목록의 환경이 변경되면, compare_with 환경들과 비교해야 한다는 의미.
-(reference_environments의 대칭 그룹과 달리 방향성이 있다.)
+방향성이 있다(비대칭). 대칭 비교가 필요하면 changed/compare_with에 서로를 양방향으로 적는다.
 
 환경명 표기 불일치 대응: 룰엔 `dev2-kr-west1`인데 실제 디렉토리는 `dev2`처럼 다를 수 있다.
 - 코드가 정규화 매칭(대소문자·하이픈/언더스코어 무시 + 접두어 일치)으로 best-effort로 잇고,
