@@ -9,9 +9,9 @@ LLM이 도구(grep/read/glob)로 레포를 능동적으로 탐색하는 **tool u
 ```mermaid
 flowchart TD
     START([START]) --> fetch_pr
-    fetch_pr["<b>fetch_pr</b><br/>GitHub API로 PR 메타·diff·기존코멘트 수집<br/>ToolContext 준비"]
+    fetch_pr["<b>fetch_pr</b><br/>GitHub API로 PR 메타·diff·기존코멘트 수집<br/>레포 디렉토리 트리 생성"]
     fetch_pr --> planner
-    planner["<b>planner</b> (LLM)<br/>변경 파일을 보고<br/>에이전트를 N개로 분할 결정"]
+    planner["<b>planner</b> (LLM)<br/>레포 트리 + 변경 파일을 보고<br/>에이전트를 N개로 분할 결정"]
 
     planner -. "Send" .-> a1
     planner -. "Send" .-> a2
@@ -53,8 +53,9 @@ flowchart TD
   **게이트웨이 타임아웃(예: 60초)을 넘기지 않는다.** "큰 입력 한 방"이 타임아웃의 원인이었다.
 - **능동 탐색** — GitOps의 핵심인 "빠뜨린 연관 설정 / 환경 간 불일치"는 diff만 봐선 못 잡는다.
   LLM이 다른 환경 파일을 `grep`으로 직접 들춰봐야 잡힌다. tool use loop가 이걸 가능케 한다.
-- **동적 멀티에이전트** — planner가 변경 파일을 보고 에이전트 수를 정한다. 작은 PR은 1개,
-  helm·kustomize가 섞이면 나눠서 병렬 리뷰. LangGraph의 `Send` API로 런타임에 fan-out한다.
+- **동적 멀티에이전트** — planner가 **레포 디렉토리 트리 + 변경 파일**을 보고 에이전트 수를 정한다.
+  작은 PR은 1개, helm·kustomize가 섞이면 나눠서 병렬 리뷰. 트리로 형제 환경(dev2 옆 qa2·prd-* 등)을
+  파악해 환경 일관성 점검 대상을 focus에 구체적으로 배치한다. LangGraph `Send` API로 런타임 fan-out.
 
 ### tool use loop (agent.py)
 

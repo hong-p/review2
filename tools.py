@@ -239,6 +239,36 @@ def _glob(ctx: ToolContext, pattern: str) -> str:
     return _clip(ctx, "\n".join(rels))
 
 
+def build_repo_tree(repo_dir: str, max_depth: int = 4, max_chars: int = 6_000) -> str:
+    """레포 디렉토리 트리(+ yaml/md 파일)를 문자열로. planner가 환경 구성을 파악하게 한다.
+
+    모노레포 대비: depth로 가지치기, 디렉토리당 yaml 파일은 일부만, 전체 크기 상한.
+    """
+    root = os.path.realpath(repo_dir)
+    if not os.path.isdir(root):
+        return "(레포 디렉토리를 찾을 수 없음)"
+    lines: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in (".git", "node_modules"))
+        rel = os.path.relpath(dirpath, root)
+        depth = 0 if rel == "." else rel.count(os.sep) + 1
+        if depth > max_depth:
+            dirnames[:] = []  # 더 깊이 안 들어감
+            continue
+        indent = "  " * depth
+        name = os.path.basename(root) if rel == "." else os.path.basename(dirpath)
+        lines.append(f"{indent}{name}/")
+        yamls = [f for f in sorted(filenames) if f.endswith((".yaml", ".yml", ".md"))]
+        for f in yamls[:8]:
+            lines.append(f"{indent}  {f}")
+        if len(yamls) > 8:
+            lines.append(f"{indent}  …(yaml {len(yamls) - 8}개 더)")
+    text = "\n".join(lines)
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"\n…(트리 잘림: {len(text) - max_chars}자 생략)"
+
+
 def _list_dir(ctx: ToolContext, path: str) -> str:
     full = _safe_path(ctx, path)
     if not os.path.isdir(full):

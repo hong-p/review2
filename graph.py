@@ -25,7 +25,7 @@ from config import Config
 from diff_utils import parse_diff, split_diff_by_file, validate_comments
 from github_api import GitHubAPI
 from llm import LLM, clip
-from tools import ToolContext
+from tools import ToolContext, build_repo_tree
 
 log = logging.getLogger(__name__)
 
@@ -36,6 +36,7 @@ class ReviewState(TypedDict, total=False):
     pr_title: str
     pr_body: str
     changed_files: list[dict]
+    repo_tree: str
     valid_lines: dict
     existing_comments: list[dict]
     agents: list[dict]                              # planner 결과
@@ -77,14 +78,16 @@ def build_graph(gh: GitHubAPI, llm: LLM, cfg: Config):
             max_file_chars=cfg.max_file_chars,
             max_diff_chars=cfg.max_diff_chars,
         )
+        repo_tree = build_repo_tree(cfg.repo_dir, cfg.max_tree_depth, cfg.max_tree_chars)
         log.info(
-            "PR #%s: 파일 %d개, 기존 코멘트 %d개, repo_dir=%s",
-            cfg.pr_number, len(changed), len(existing), cfg.repo_dir,
+            "PR #%s: 파일 %d개, 기존 코멘트 %d개, repo_dir=%s (트리 %d자)",
+            cfg.pr_number, len(changed), len(existing), cfg.repo_dir, len(repo_tree),
         )
         return {
             "pr_title": pr.get("title", ""),
             "pr_body": pr.get("body") or "",
             "changed_files": changed,
+            "repo_tree": repo_tree,
             "valid_lines": valid_lines,
             "existing_comments": existing,
         }
@@ -97,6 +100,7 @@ def build_graph(gh: GitHubAPI, llm: LLM, cfg: Config):
         )
         user = (
             f"# PR: {state['pr_title']}\n{state['pr_body'][:1000]}\n\n"
+            f"## 레포 디렉토리 구조\n{state['repo_tree']}\n\n"
             f"## 변경된 파일 ({len(state['changed_files'])}개)\n{file_list}"
         )
         raw = await llm.chat(
