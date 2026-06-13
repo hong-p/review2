@@ -10,7 +10,7 @@ import logging
 import sys
 
 from config import load_config
-from github_mcp import github_mcp
+from github_api import github_api
 from graph import build_graph
 from llm import LLM
 
@@ -28,7 +28,7 @@ async def run() -> int:
         "리뷰 시작: %s/%s PR #%d (dry_run=%s)",
         cfg.owner, cfg.repo, cfg.pr_number, cfg.dry_run,
     )
-    async with github_mcp(cfg) as gh:
+    async with github_api(cfg) as gh:
         llm = LLM(cfg)
         graph = build_graph(gh, llm, cfg)
         result = await graph.ainvoke({})

@@ -23,7 +23,7 @@ import prompts
 from agent import run_agent
 from config import Config
 from diff_utils import parse_diff, split_diff_by_file, validate_comments
-from github_mcp import GitHubMCP
+from github_api import GitHubAPI
 from llm import LLM, clip
 from tools import ToolContext
 
@@ -49,7 +49,7 @@ class ReviewState(TypedDict, total=False):
     posted_agreements: int
 
 
-def build_graph(gh: GitHubMCP, llm: LLM, cfg: Config):
+def build_graph(gh: GitHubAPI, llm: LLM, cfg: Config):
     lang = cfg.review_language
     ctx_holder: dict[str, ToolContext] = {}      # fetch_pr가 채워 agent 노드와 공유
     agent_sem = asyncio.Semaphore(cfg.agent_concurrency)

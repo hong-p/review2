@@ -1,8 +1,7 @@
 """환경변수 / CLI 파라미터 로딩. 우선순위: CLI 인자 > 환경변수 > 기본값."""
 import argparse
 import os
-import shlex
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -21,8 +20,8 @@ class Config:
     llm_max_retries: int = 2
     llm_concurrency: int = 2     # 배치 병렬 호출 시 로컬 LLM 과부하 방지
 
-    # GitHub MCP 서버 실행 커맨드 (stdio). 게시(코멘트 등록)에만 사용한다.
-    mcp_command: list[str] = field(default_factory=list)
+    # GitHub REST API base URL. GitHub Enterprise면 https://<host>/api/v3
+    github_api_url: str = "https://api.github.com"
 
     # 로컬 레포 경로 — tool use loop의 grep/glob/read가 여기서 파일을 읽는다.
     # Jenkins 워크스페이스에 PR 브랜치가 checkout된 디렉토리.
@@ -41,12 +40,6 @@ class Config:
     review_language: str = "Korean"
     dry_run: bool = False
     no_think: bool = True   # 탐색 턴에서 thinking 비활성 (Qwen3 /no_think). 타임아웃 방지
-
-
-DEFAULT_MCP_CMD = (
-    # 기본: 공식 GitHub MCP 서버를 docker stdio 모드로 실행
-    "docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server"
-)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -72,8 +65,8 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="LLM 호출 실패 시 재시도 횟수 [env: LLM_MAX_RETRIES, 기본 2]")
     p.add_argument("--llm-concurrency", type=int, default=int(env("LLM_CONCURRENCY", "2")),
                    help="LLM 동시 호출 수 [env: LLM_CONCURRENCY, 기본 2]")
-    p.add_argument("--mcp-cmd", default=env("GITHUB_MCP_CMD", DEFAULT_MCP_CMD),
-                   help="GitHub MCP 서버 실행 커맨드(게시용) [env: GITHUB_MCP_CMD]")
+    p.add_argument("--github-api-url", default=env("GITHUB_API_URL", "https://api.github.com"),
+                   help="GitHub REST API base URL. GHE면 https://<host>/api/v3 [env: GITHUB_API_URL]")
     p.add_argument("--repo-dir", default=env("REPO_DIR", "."),
                    help="로컬 레포 경로(PR 브랜치 checkout됨) [env: REPO_DIR, 기본 .]")
     p.add_argument("--max-turns", type=int, default=int(env("MAX_TURNS", "15")),
@@ -114,7 +107,7 @@ def load_config(argv: list[str] | None = None) -> Config:
         llm_timeout=args.llm_timeout,
         llm_max_retries=args.llm_retries,
         llm_concurrency=max(1, args.llm_concurrency),
-        mcp_command=shlex.split(args.mcp_cmd),
+        github_api_url=args.github_api_url,
         repo_dir=args.repo_dir,
         max_turns=args.max_turns,
         max_agents=max(1, args.max_agents),

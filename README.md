@@ -7,22 +7,44 @@ LLM이 도구(grep/read/glob)로 레포를 능동적으로 탐색하는 **tool u
 ## 아키텍처
 
 ```mermaid
-graph TD
+flowchart TD
     START([START]) --> fetch_pr
-    fetch_pr["fetch_pr<br/><i>PR 메타/diff/기존코멘트 수집</i>"] --> planner
-    planner["planner (LLM)<br/><i>변경 파일 보고<br/>에이전트 N개로 분할 결정</i>"]
-    planner -.Send fan-out.-> a1["agent 1<br/><i>tool use loop</i>"]
-    planner -.Send fan-out.-> a2["agent 2<br/><i>tool use loop</i>"]
-    planner -.Send fan-out.-> aN["agent N<br/><i>tool use loop</i>"]
+    fetch_pr["<b>fetch_pr</b><br/>GitHub API로 PR 메타·diff·기존코멘트 수집<br/>ToolContext 준비"]
+    fetch_pr --> planner
+    planner["<b>planner</b> (LLM)<br/>변경 파일을 보고<br/>에이전트를 N개로 분할 결정"]
+
+    planner -. "Send" .-> a1
+    planner -. "Send" .-> a2
+    planner -. "Send" .-> aN
+
+    subgraph fan["동적 fan-out — 에이전트별 tool use loop (병렬)"]
+        direction TB
+        a1["<b>agent 1</b> (LLM)<br/>grep · read_file · glob<br/>↻ 도구 호출이 멈출 때까지 반복"]
+        a2["<b>agent 2</b> (LLM)<br/>↻ tool use loop"]
+        aN["<b>agent N</b> (LLM)<br/>↻ tool use loop"]
+    end
+
     a1 --> aggregator
     a2 --> aggregator
     aN --> aggregator
-    aggregator["aggregator (LLM)<br/><i>발견사항 + 기존코멘트 종합<br/>→ 최종 리뷰 JSON</i>"]
-    aggregator --> post_summary["post_summary<br/><i>PR 전체 코멘트</i>"]
-    aggregator --> post_inline["post_inline<br/><i>인라인 + 동의 답글</i>"]
+    aggregator["<b>aggregator</b> (LLM)<br/>발견사항 + 기존코멘트 종합<br/>→ 최종 리뷰 JSON · 인라인 라인 검증"]
+
+    aggregator --> post_summary["<b>post_summary</b><br/>GitHub API: PR 전체 코멘트"]
+    aggregator --> post_inline["<b>post_inline</b><br/>GitHub API: 인라인 + 동의 답글"]
     post_summary --> END([END])
     post_inline --> END
+
+    classDef llm fill:#e6f1fb,stroke:#378add,color:#0c447c
+    classDef io fill:#eaf3de,stroke:#639922,color:#27500a
+    class planner,a1,a2,aN,aggregator llm
+    class fetch_pr,post_summary,post_inline io
 ```
+
+> 파란 노드 = LLM 호출, 초록 노드 = GitHub API I/O.
+> `planner`가 런타임에 `Send`로 에이전트를 동적 생성(fan-out) → 각 에이전트가 도구로 레포를
+> 탐색하는 tool use loop를 독립적으로 돌고(병렬) → 모두 끝나면 `aggregator`로 합류(fan-in)한다.
+> 각 에이전트의 발견사항은 `Annotated[list, operator.add]` reducer로 합쳐진다.
+> **에이전트의 도구 반복 루프는 노드 내부**(agent.py)에서 돌며, 그래프 토폴로지는 PR 크기와 무관하게 동일하다.
 
 ### 왜 이 구조인가
 
@@ -101,7 +123,7 @@ g.add_edge("agent", "aggregator")                                # 모두 끝나
 | `agent.py` | **tool use loop** — 에이전트 1개를 도구 호출이 멈출 때까지 구동 |
 | `tools.py` | 로컬 fs 도구 + native function calling 스키마 + 실행 디스패처 |
 | `llm.py` | OpenAI-compatible 래퍼 (`chat`, `chat_with_tools`, thinking 제어) |
-| `github_mcp.py` | GitHub MCP — PR 메타 조회와 게시 전용 (파일 읽기는 로컬 도구가 담당) |
+| `github_api.py` | GitHub REST API (httpx) — PR 메타 조회와 게시 전용 (파일 읽기는 로컬 도구가 담당) |
 | `diff_utils.py` | diff 파싱·라인번호 주석, 파일 단위 분할, 인라인 코멘트 검증 |
 | `prompts.py` | planner / agent / aggregator 프롬프트 |
 | `config.py` | CLI 인자/환경변수 |
@@ -126,7 +148,7 @@ CLI 파라미터 또는 환경변수. **CLI 인자 > 환경변수** 우선순위
 | `--llm-timeout` | `LLM_TIMEOUT` | | LLM 호출당 대기(초), 기본 600 |
 | `--llm-concurrency` | `LLM_CONCURRENCY` | | LLM 동시 호출 수, 기본 2 |
 | `--think` | `THINK` | | thinking 활성 (기본 비활성) |
-| `--mcp-cmd` | `GITHUB_MCP_CMD` | | 게시용 GitHub MCP 서버 커맨드 |
+| `--github-api-url` | `GITHUB_API_URL` | | GitHub REST API base URL. GHE면 `https://<host>/api/v3`, 기본 `https://api.github.com` |
 | `--language` | `REVIEW_LANGUAGE` | | 리뷰 언어, 기본 Korean |
 | `--dry-run` | `DRY_RUN=1` | | 게시하지 않고 로그로만 |
 
@@ -156,9 +178,15 @@ python main.py \
 `reference_environments` 같은 환경 그룹 선언을 넣으면 에이전트가 환경 비교의 기준으로 삼는다.
 포맷은 [REVIEW_RULE.example.md](REVIEW_RULE.example.md) 참고.
 
+## GitHub: MCP 대신 REST API
+
+GitHub 연동은 MCP(docker/stdio) 대신 [github_api.py](github_api.py)에서 **REST API를 직접 호출**한다.
+쓰는 기능이 PR 조회 + 코멘트 게시 몇 개뿐이라 MCP는 오버스펙이고, docker 의존이 사내 환경에서
+깨지기 쉬웠다. GitHub Enterprise는 `--github-api-url`만 바꾸면 된다. 인라인 코멘트는 reviews API로
+한 번에 등록하고, 일괄 실패(line이 diff 밖 등) 시 코멘트를 개별로 쪼개 되는 것만 건진다.
+
 ## 참고
 
-- GitHub MCP 서버 버전에 따라 게시 툴 이름이 다를 수 있다. `github_mcp.py` 상단 `TOOLS` 딕셔너리에서 조정.
 - 로컬 LLM이 **native function calling(tools 파라미터)** 을 지원해야 한다 (Qwen3.6 등 지원).
   서버가 thinking을 강제하거나 tools를 미지원하면 `llm.py`에서 조정이 필요할 수 있다.
 - 게이트웨이 타임아웃이 계속 발생하면: thinking이 꺼졌는지(`<think>` 블록 유무), 도구 결과 상한
