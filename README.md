@@ -178,11 +178,15 @@ python main.py \
 전제: **PR 브랜치가 `--repo-dir`에 git checkout 되어 있어야 한다** (도구가 head 기준으로
 파일을 읽는다). Jenkins라면 GitHub 트리거로 PR 브랜치를 체크아웃한 뒤 이 봇을 호출한다.
 
-## REVIEW_RULE.md
+## REVIEW_RULE.md (서비스별 규칙)
 
-레포에 두면 에이전트가 `read_file`로 읽어 규칙을 참고한다. 자유 텍스트지만,
-`reference_environments` 같은 환경 그룹 선언을 넣으면 에이전트가 환경 비교의 기준으로 삼는다.
-포맷은 [REVIEW_RULE.example.md](REVIEW_RULE.example.md) 참고.
+각 서비스 디렉토리(`gitops/lcm-manila/`, `gitops/lcm-cinder/` 등)에 두면, 그 서비스를
+담당하는 에이전트가 `read_file`로 읽어 규칙을 적용한다. 자유 텍스트지만 `reference_environments`
+같은 환경 그룹 선언을 넣으면 환경 비교 기준으로 삼는다. 포맷은 [REVIEW_RULE.example.md](REVIEW_RULE.example.md) 참고.
+
+**여러 서비스가 한 PR에 섞이면** planner가 레포 트리에서 각 서비스의 REVIEW_RULE.md를 보고
+**서비스별로 에이전트를 나눈다.** lcm-manila 담당 에이전트는 `lcm-manila/REVIEW_RULE.md`를,
+lcm-cinder 담당은 `lcm-cinder/REVIEW_RULE.md`를 각각 적용해 룰이 섞이지 않는다.
 
 ## GitHub: MCP 대신 REST API
 
