@@ -11,15 +11,34 @@ REVIEW_RULE.md 작성 가이드
 
 ## 참고 환경
 
-같은 그룹에 속한 환경들은 설정이 통일되어야 한다.
-한 환경의 파일이 변경되면 봇이 같은 그룹의 다른 환경에서 대응 파일을 읽어 비교한다.
-(예: `kustomize/overlay/dev2/deployment.yaml` 변경 → `dev/`, `qa2/`의 같은 파일과 비교)
+### 방식 1: reference_environments (대칭 그룹)
+
+같은 그룹에 속한 환경들은 설정이 통일되어야 한다. 한 환경이 변경되면 같은 그룹의 다른 환경과 비교한다.
 
 ```yaml
 reference_environments:
   - [dev, dev2, qa2]
   - [prd-a, prd-b, prd-c]
 ```
+
+### 방식 2: environment_checks (비대칭 단방향 — 승급 파이프라인용)
+
+`changed`의 환경이 PR에서 변경되면, `compare_with`의 환경들과 비교한다.
+상위 환경일수록 더 많은 하위 환경과 대조하도록 누적해서 적는다 (검증된 값이 올라와야 하므로).
+봇이 변경된 환경을 감지해 비교 대상 파일 경로를 자동 계산하고, 에이전트가 값을 대조한다.
+
+```yaml
+environment_checks:
+  - changed: [dev2-kr-west1, dev2-kr-west2]
+    compare_with: [lcm3-kr-west1]
+  - changed: [qa2-kr-west1, qa2-kr-west2]
+    compare_with: [lcm3-kr-west1, dev2-kr-west1, dev2-kr-west2]
+  - changed: [prd-e-kr-west1, prd-e-kr-east1]
+    compare_with: [dev2-kr-west1, dev2-kr-west2, qa2-kr-west1, qa2-kr-west2]
+```
+
+- 환경 이름은 디렉토리 세그먼트와 정확히 일치해야 한다 (`overlay/dev2-kr-west1/...`).
+- 비교는 같은 파일의 같은 위치 환경만 치환해 대조한다 (`dev2-kr-west1/x.yaml` ↔ `lcm3-kr-west1/x.yaml`).
 
 ## 공통 규칙
 

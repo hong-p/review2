@@ -188,6 +188,14 @@ python main.py \
 **서비스별로 에이전트를 나눈다.** lcm-manila 담당 에이전트는 `lcm-manila/REVIEW_RULE.md`를,
 lcm-cinder 담당은 `lcm-cinder/REVIEW_RULE.md`를 각각 적용해 룰이 섞이지 않는다.
 
+### 환경 비교 (두 방식)
+
+- **`reference_environments`** — 대칭 그룹. 그룹 내 환경끼리 통일돼야 함.
+- **`environment_checks`** — 비대칭 단방향(승급 파이프라인). `changed`가 변경되면 `compare_with`와 비교.
+  상위 환경(prd)일수록 더 많은 하위 환경(dev/qa)과 대조. **코드가** [env_rules.py](env_rules.py)에서
+  변경 환경을 감지해 비교 대상 파일 경로를 결정론적으로 계산하고, **에이전트가** 그 파일들을 읽어 값을 대조한다.
+  (LLM이 환경 매핑을 추정하지 않으므로 정확하다.)
+
 ## GitHub: MCP 대신 REST API
 
 GitHub 연동은 MCP(docker/stdio) 대신 [github_api.py](github_api.py)에서 **REST API를 직접 호출**한다.

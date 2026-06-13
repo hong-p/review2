@@ -25,15 +25,18 @@ log = logging.getLogger(__name__)
 
 
 async def run_agent(llm: LLM, agent: dict, ctx: ToolContext, max_turns: int,
-                    language: str, no_think: bool) -> dict:
+                    language: str, no_think: bool, env_hint: str = "") -> dict:
     """에이전트 1개를 끝까지 돌리고 {name, findings}를 반환."""
     name = agent.get("name", "reviewer")
     focus = agent.get("focus", "PR 전반")
     files = agent.get("files") or [f["path"] for f in ctx.changed_files]
 
+    start = "리뷰를 시작하라. 담당 변경 파일:\n" + "\n".join(f"- {p}" for p in files)
+    if env_hint:
+        start += f"\n\n{env_hint}"
     messages = [
         {"role": "system", "content": prompts.AGENT_SYSTEM.format(focus=focus, language=language)},
-        {"role": "user", "content": f"리뷰를 시작하라. 담당 변경 파일:\n" + "\n".join(f"- {p}" for p in files)},
+        {"role": "user", "content": start},
     ]
 
     for turn in range(max_turns):

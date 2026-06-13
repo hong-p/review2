@@ -13,6 +13,8 @@ import asyncio
 import json
 import logging
 import operator
+import os
+import posixpath
 import re
 from typing import Annotated, TypedDict
 
@@ -23,9 +25,12 @@ import prompts
 from agent import run_agent
 from config import Config
 from diff_utils import parse_diff, split_diff_by_file, validate_comments
+from env_rules import build_directive, parse_environment_checks, resolve_comparisons
 from github_api import GitHubAPI
 from llm import LLM, clip
 from tools import ToolContext, build_repo_tree
+
+RULE_FILENAME = "REVIEW_RULE.md"
 
 log = logging.getLogger(__name__)
 
@@ -79,9 +84,18 @@ def build_graph(gh: GitHubAPI, llm: LLM, cfg: Config):
             max_diff_chars=cfg.max_diff_chars,
         )
         repo_tree = build_repo_tree(cfg.repo_dir, cfg.max_tree_depth, cfg.max_tree_chars)
+
+        # REVIEW_RULE.md의 environment_checks로 비교 대상 환경/파일을 결정론적으로 산출
+        rule_texts = _read_rule_files(cfg.repo_dir, changed)
+        checks = parse_environment_checks(rule_texts)
+        comparisons, peer_paths = resolve_comparisons([c["path"] for c in changed], checks)
+        env_directive = build_directive(comparisons, peer_paths)
+        ctx_holder["env_directive"] = env_directive
+
         log.info(
-            "PR #%s: 파일 %d개, 기존 코멘트 %d개, repo_dir=%s (트리 %d자)",
-            cfg.pr_number, len(changed), len(existing), cfg.repo_dir, len(repo_tree),
+            "PR #%s: 파일 %d개, 기존 코멘트 %d개, 환경 비교 규칙 %d개 → 비교환경 %s",
+            cfg.pr_number, len(changed), len(existing), len(checks),
+            {k: v for k, v in comparisons.items()} or "(없음)",
         )
         return {
             "pr_title": pr.get("title", ""),
@@ -98,10 +112,13 @@ def build_graph(gh: GitHubAPI, llm: LLM, cfg: Config):
         file_list = "\n".join(
             f"- {f['path']} ({f['status']})" for f in state["changed_files"]
         )
+        directive = ctx_holder.get("env_directive", "")
+        directive_section = f"\n\n{directive}" if directive else ""
         user = (
             f"# PR: {state['pr_title']}\n{state['pr_body'][:1000]}\n\n"
             f"## 레포 디렉토리 구조\n{state['repo_tree']}\n\n"
             f"## 변경된 파일 ({len(state['changed_files'])}개)\n{file_list}"
+            f"{directive_section}"
         )
         raw = await llm.chat(
             prompts.PLANNER_SYSTEM.format(max_agents=cfg.max_agents), user,
@@ -123,6 +140,7 @@ def build_graph(gh: GitHubAPI, llm: LLM, cfg: Config):
             result = await run_agent(
                 llm, payload["agent_spec"], ctx,
                 max_turns=cfg.max_turns, language=lang, no_think=cfg.no_think,
+                env_hint=ctx_holder.get("env_directive", ""),
             )
         return {"agent_findings": [result]}
 
@@ -282,6 +300,28 @@ def _parse_agents(raw: str, changed_files: list[dict], max_agents: int) -> list[
             "files": [f["path"] for f in changed_files],
         }]
     return agents
+
+
+def _read_rule_files(repo_dir: str, changed: list[dict]) -> list[str]:
+    """변경 파일들의 상위 디렉토리에서 REVIEW_RULE.md를 찾아 로컬에서 읽는다.
+    (서비스마다 다를 수 있어 변경 파일 경로별로 거슬러 올라가며 수집)
+    """
+    seen: set[str] = set()
+    texts: list[str] = []
+    for f in changed:
+        d = posixpath.dirname(f["path"])
+        while True:
+            rule = posixpath.join(d, RULE_FILENAME) if d else RULE_FILENAME
+            if rule not in seen:
+                seen.add(rule)
+                full = os.path.join(repo_dir, rule)
+                if os.path.isfile(full):
+                    with open(full, encoding="utf-8", errors="replace") as fh:
+                        texts.append(fh.read())
+            if not d:
+                break
+            d = posixpath.dirname(d)
+    return texts
 
 
 def _format_existing(comments: list[dict], limit: int) -> str:
