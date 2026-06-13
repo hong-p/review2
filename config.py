@@ -21,19 +21,26 @@ class Config:
     llm_max_retries: int = 2
     llm_concurrency: int = 2     # 배치 병렬 호출 시 로컬 LLM 과부하 방지
 
-    # GitHub MCP 서버 실행 커맨드 (stdio)
+    # GitHub MCP 서버 실행 커맨드 (stdio). 게시(코멘트 등록)에만 사용한다.
     mcp_command: list[str] = field(default_factory=list)
+
+    # 로컬 레포 경로 — tool use loop의 grep/glob/read가 여기서 파일을 읽는다.
+    # Jenkins 워크스페이스에 PR 브랜치가 checkout된 디렉토리.
+    repo_dir: str = "."
+
+    # tool use loop
+    max_turns: int = 15           # 에이전트 1개가 도는 최대 턴 수 (무한루프 방지)
+    max_agents: int = 5           # planner가 만들 수 있는 최대 에이전트 수
+    agent_concurrency: int = 2    # 에이전트 동시 실행 수 (단일 GPU면 1 권장)
+    max_tool_result_chars: int = 8_000   # 도구 1회 결과 상한 (grep/read 등)
+    max_file_chars: int = 20_000         # read_file 1회 상한
+    max_diff_chars: int = 40_000         # get_diff 결과 상한
+    max_comments_chars: int = 15_000     # 기존 리뷰 코멘트 전달 상한
 
     # 동작 옵션
     review_language: str = "Korean"
     dry_run: bool = False
-    # 대형 PR 처리: 아래 값들은 'LLM 호출 1회당' 예산이다.
-    # 초과하면 파일 단위 배치로 쪼개서 여러 번 호출 후 결과를 병합한다.
-    max_diff_chars: int = 60_000        # 호출당 diff 예산
-    max_file_chars: int = 20_000        # 파일 1개당 상한
-    max_base_total_chars: int = 80_000  # 호출당 base/peer 파일 예산
-    max_peer_total_chars: int = 60_000
-    max_comments_chars: int = 15_000    # 기존 리뷰 코멘트 전달 상한
+    no_think: bool = True   # 탐색 턴에서 thinking 비활성 (Qwen3 /no_think). 타임아웃 방지
 
 
 DEFAULT_MCP_CMD = (
@@ -66,12 +73,23 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--llm-concurrency", type=int, default=int(env("LLM_CONCURRENCY", "2")),
                    help="LLM 동시 호출 수 [env: LLM_CONCURRENCY, 기본 2]")
     p.add_argument("--mcp-cmd", default=env("GITHUB_MCP_CMD", DEFAULT_MCP_CMD),
-                   help="GitHub MCP 서버 실행 커맨드 [env: GITHUB_MCP_CMD]")
+                   help="GitHub MCP 서버 실행 커맨드(게시용) [env: GITHUB_MCP_CMD]")
+    p.add_argument("--repo-dir", default=env("REPO_DIR", "."),
+                   help="로컬 레포 경로(PR 브랜치 checkout됨) [env: REPO_DIR, 기본 .]")
+    p.add_argument("--max-turns", type=int, default=int(env("MAX_TURNS", "15")),
+                   help="에이전트당 tool use loop 최대 턴 [env: MAX_TURNS, 기본 15]")
+    p.add_argument("--max-agents", type=int, default=int(env("MAX_AGENTS", "5")),
+                   help="planner가 만들 최대 에이전트 수 [env: MAX_AGENTS, 기본 5]")
+    p.add_argument("--agent-concurrency", type=int, default=int(env("AGENT_CONCURRENCY", "2")),
+                   help="에이전트 동시 실행 수, 단일 GPU면 1 권장 [env: AGENT_CONCURRENCY, 기본 2]")
     p.add_argument("--language", default=env("REVIEW_LANGUAGE", "Korean"),
                    help="리뷰 언어 [env: REVIEW_LANGUAGE, 기본 Korean]")
     p.add_argument("--dry-run", action="store_true",
                    default=env("DRY_RUN", "") in ("1", "true", "yes"),
                    help="GitHub에 게시하지 않고 로그로만 출력 [env: DRY_RUN=1]")
+    p.add_argument("--think", action="store_true",
+                   default=env("THINK", "") in ("1", "true", "yes"),
+                   help="탐색 턴에서도 thinking 활성 (기본은 비활성) [env: THINK=1]")
     return p
 
 
@@ -97,8 +115,13 @@ def load_config(argv: list[str] | None = None) -> Config:
         llm_max_retries=args.llm_retries,
         llm_concurrency=max(1, args.llm_concurrency),
         mcp_command=shlex.split(args.mcp_cmd),
+        repo_dir=args.repo_dir,
+        max_turns=args.max_turns,
+        max_agents=max(1, args.max_agents),
+        agent_concurrency=max(1, args.agent_concurrency),
         review_language=args.language,
         dry_run=args.dry_run,
+        no_think=not args.think,
     )
 
     missing = [

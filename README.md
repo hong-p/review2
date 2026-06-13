@@ -1,197 +1,165 @@
 # GitOps PR 리뷰봇
 
-LangGraph + GitHub MCP + 로컬 LLM(OpenAI-compatible)으로 GitOps 레포 PR을 자동 리뷰한다.
+LangGraph + 로컬 LLM(OpenAI-compatible)으로 GitOps 레포 PR을 자동 리뷰한다.
+LLM이 도구(grep/read/glob)로 레포를 능동적으로 탐색하는 **tool use loop** 구조이며,
+변경 규모에 따라 **에이전트를 동적으로 나눠 병렬 리뷰**한다.
 
-## LangGraph 파이프라인 구조
-
-노드 6개를 가진 `StateGraph` 하나로 구성된다. 전체 정의는 [graph.py](graph.py)의 `build_graph()`.
+## 아키텍처
 
 ```mermaid
 graph TD
     START([START]) --> fetch_pr
-    fetch_pr["fetch_pr<br/><i>GitHub MCP로 PR 데이터 수집</i>"]
-    fetch_pr --> changed_analyzer["changed_analyzer (LLM)<br/><i>diff 분석<br/>+ 룰(PR에서 변경된 경우)</i>"]
-    fetch_pr --> base_analyzer["base_analyzer (LLM)<br/><i>base 원본 + 참고 환경 분석<br/>+ 룰(변경 안 된 경우)</i>"]
-    changed_analyzer --> compare_reviewer
-    base_analyzer --> compare_reviewer
-    compare_reviewer["compare_reviewer (LLM)<br/><i>두 분석 종합 → JSON<br/>{summary, inline_comments, agreements}</i>"]
-    compare_reviewer --> post_summary["post_summary<br/><i>PR 전체 코멘트 등록</i>"]
-    compare_reviewer --> post_inline["post_inline<br/><i>인라인 코멘트 + 동의 답글 등록</i>"]
+    fetch_pr["fetch_pr<br/><i>PR 메타/diff/기존코멘트 수집</i>"] --> planner
+    planner["planner (LLM)<br/><i>변경 파일 보고<br/>에이전트 N개로 분할 결정</i>"]
+    planner -.Send fan-out.-> a1["agent 1<br/><i>tool use loop</i>"]
+    planner -.Send fan-out.-> a2["agent 2<br/><i>tool use loop</i>"]
+    planner -.Send fan-out.-> aN["agent N<br/><i>tool use loop</i>"]
+    a1 --> aggregator
+    a2 --> aggregator
+    aN --> aggregator
+    aggregator["aggregator (LLM)<br/><i>발견사항 + 기존코멘트 종합<br/>→ 최종 리뷰 JSON</i>"]
+    aggregator --> post_summary["post_summary<br/><i>PR 전체 코멘트</i>"]
+    aggregator --> post_inline["post_inline<br/><i>인라인 + 동의 답글</i>"]
     post_summary --> END([END])
     post_inline --> END
 ```
 
-### 왜 LangGraph인가
+### 왜 이 구조인가
 
-흐름이 단순 직선이면 프레임워크 없이 함수 호출로 충분하다. 이 파이프라인은
-**병렬 구간이 두 번** 있어서 LangGraph의 fan-out/join이 실질적인 가치를 갖는다:
+- **tool use loop** — base 파일을 통째로 프롬프트에 넣지 않는다. LLM이 그때그때 필요한
+  조각만 `grep`/`read_file`로 요청한다. 한 LLM 호출의 입력이 작아서 prefill이 빠르고,
+  **게이트웨이 타임아웃(예: 60초)을 넘기지 않는다.** "큰 입력 한 방"이 타임아웃의 원인이었다.
+- **능동 탐색** — GitOps의 핵심인 "빠뜨린 연관 설정 / 환경 간 불일치"는 diff만 봐선 못 잡는다.
+  LLM이 다른 환경 파일을 `grep`으로 직접 들춰봐야 잡힌다. tool use loop가 이걸 가능케 한다.
+- **동적 멀티에이전트** — planner가 변경 파일을 보고 에이전트 수를 정한다. 작은 PR은 1개,
+  helm·kustomize가 섞이면 나눠서 병렬 리뷰. LangGraph의 `Send` API로 런타임에 fan-out한다.
 
-1. 분석 단계 — changed_analyzer와 base_analyzer는 서로 입력이 독립적(diff vs base 원본)이라 동시 실행
-2. 게시 단계 — 전체 코멘트와 인라인 코멘트는 서로 다른 GitHub API라 동시 실행
+### tool use loop (agent.py)
 
-### 병렬 실행과 join의 동작 원리
+각 에이전트는 다음을 도구 호출이 멈출 때까지 반복한다:
 
-```python
-g.add_edge("fetch_pr", "changed_analyzer")   # ┐ fetch_pr가 끝나면
-g.add_edge("fetch_pr", "base_analyzer")      # ┘ 두 노드가 동시에 시작 (fan-out)
-g.add_edge(["changed_analyzer", "base_analyzer"], "compare_reviewer")  # join
+```
+messages = [system(담당 영역), user(시작 지시)]
+while 턴 < max_turns:
+    msg = LLM(messages, tools)          # 다음 행동 결정
+    messages.append(msg)
+    if msg에 tool_calls 없음:            # 최종 발견사항
+        return findings
+    각 tool_call 실행 → 결과를 messages에 append   # 관찰을 누적
+턴 초과 → 도구 없이 결론 강제
 ```
 
-- 한 노드에서 나가는 edge가 2개면 LangGraph가 같은 superstep에서 두 노드를 **동시에** 실행한다.
-- `add_edge([a, b], c)` 형태의 join은 a, b가 **둘 다 끝나야** c를 시작한다.
-- 병렬 노드들이 같은 State를 동시에 쓰면 충돌이 나므로, 각 노드는 **서로 다른 키에만 기록**한다
-  (changed_analyzer→`changed_analysis`, base_analyzer→`base_analysis`,
-  post_summary→`posted_summary`, post_inline→`posted_inline`/`posted_agreements`).
-  덕분에 reducer 없이 기본 State 병합으로 충분하다.
+LLM이 `grep("replicas", "overlay/prd-*")` 같은 도구를 요청하면 코드가 **로컬 레포에서**
+실행해 결과를 돌려준다. LLM은 두뇌(판단), 코드는 손발(실행)이다.
 
-### ReviewState — 노드 간 데이터 흐름
+### 도구 (tools.py)
 
-State는 `TypedDict`이며, 각 노드는 입력으로 전체 State를 받고 자신이 만든 키만 반환한다.
+모든 도구는 로컬 체크아웃(`--repo-dir`)에서 실행되며 레포 밖 접근은 차단된다.
 
-| 키 | 쓰는 노드 | 읽는 노드 | 내용 |
-|---|---|---|---|
-| `annotated_diff`, `diff_by_file`, `valid_lines` | fetch_pr | analyzer/reviewer, reviewer 검증 | 라인번호(R/L) 주석 diff, 파일별 분할본, 코멘트 가능 라인 집합 |
-| `rule_changed`, `head_rules`, `base_rules` | fetch_pr | changed/base_analyzer | REVIEW_RULE.md 분기 결과 |
-| `base_files`, `peer_map`, `peer_files`, `missing_peers` | fetch_pr | base_analyzer | base 원본, 참고 환경 대응 파일 |
-| `existing_comments` | fetch_pr | compare_reviewer, post_inline | 이미 달린 코멘트 (중복 방지용) |
-| `changed_analysis` / `base_analysis` | 각 analyzer | compare_reviewer | 분석 결과 텍스트 |
-| `review_summary`, `inline_comments`, `dropped_comments`, `agreements` | compare_reviewer | post_summary, post_inline | 최종 리뷰 (검증 완료) |
-| `posted_*` | post 노드들 | main.py | 등록 결과 집계 |
+| 도구 | 용도 |
+|---|---|
+| `get_changed_files` | PR 변경 파일 목록 |
+| `get_diff(path?)` | 특정 파일의 변경 diff (라인번호 주석 포함) |
+| `read_file(path, start?, end?)` | 파일 내용 (라인 범위 옵션) |
+| `grep(pattern, path_glob?)` | 정규식 검색 — 환경 비교·참조 확인의 핵심 |
+| `glob(pattern)` | 파일 경로 탐색 |
+| `list_dir(path)` | 디렉토리 목록 |
 
-### 노드별 역할 요약
+### 동적 fan-out과 fan-in
 
-| 노드 | LLM 호출 | 하는 일 |
-|---|---|---|
-| `fetch_pr` | ✗ | PR 메타/diff/파일/기존 코멘트 수집, REVIEW_RULE.md 분기, 참고 환경 peer 수집, diff 파싱·라인번호 주석 |
-| `changed_analyzer` | ✓ (배치 N회) | "무엇이 바뀌었나" — diff 분석, 룰이 PR에서 변경됐으면 head 룰 기준 평가 |
-| `base_analyzer` | ✓ (배치 N회) | "원래 어땠나" — base 원본·컨벤션 분석, 기존 룰 매핑, 참고 환경 간 통일 여부 비교 |
-| `compare_reviewer` | ✓ (배치 N회 + 병합 1회) | 두 분석 비교·종합, 구조화 JSON 출력, 인라인 라인 검증, 기존 코멘트와 중복 분리(agreements) |
-| `post_summary` | ✗ | summary + 탈락 코멘트를 PR 전체 코멘트로 등록 |
-| `post_inline` | ✗ | pending review 흐름으로 인라인 코멘트 등록 + 기존 코멘트 동의 답글 |
+```python
+g.add_conditional_edges("planner", route_to_agents, ["agent"])  # Send로 N개 띄움
+g.add_edge("agent", "aggregator")                                # 모두 끝나면 fan-in
+```
 
-배치 처리(대형 PR)는 **그래프 구조가 아니라 노드 내부**에서 일어난다 — LLM을 쓰는 노드가
-입력이 호출당 예산을 넘으면 `asyncio.gather`로 배치를 병렬 호출하고 결과를 병합해서
-하나의 State 키로 반환한다. 그래프 토폴로지는 PR 크기와 무관하게 항상 동일하다.
+- `route_to_agents`가 planner 결과를 보고 `[Send("agent", payload) for ...]`를 반환 →
+  LangGraph가 agent 노드를 **에이전트 수만큼 동적으로** 병렬 생성한다.
+- 여러 agent 인스턴스가 같은 `agent_findings` 키에 써야 하므로 **reducer**
+  (`Annotated[list, operator.add]`)로 결과를 합친다.
+- 모든 agent가 끝나야 aggregator가 1회 실행된다.
+
+> **단일 GPU 주의**: 에이전트를 병렬로 띄워도 LLM 인스턴스가 하나면 요청이 큐잉된다.
+> `--agent-concurrency 1`로 직렬화하는 게 안전할 수 있다 (LLM 호출은 `--llm-concurrency`로도 제한됨).
 
 ## 동작 특징
 
-- **REVIEW_RULE.md 분기**: PR에서 REVIEW_RULE.md가 변경됐으면 changed_analyzer가 head 버전을 읽고,
-  변경 안 됐으면 base_analyzer가 변경 파일들의 상위 디렉토리를 거슬러 올라가며
-  base 브랜치의 REVIEW_RULE.md를 찾아 읽는다 (`gitops/lcm-manila/REVIEW_RULE.md` 등).
-- **참고 환경 교차 비교**: REVIEW_RULE.md에 `reference_environments` yaml 블록으로 환경 그룹을
-  선언하면, 변경 파일 경로의 환경 세그먼트를 같은 그룹의 다른 환경으로 치환해
-  **PR에서 변경되지 않은 대응 파일**도 읽어온다. base_analyzer가 환경 간 값을 비교해
-  통일 여부 / 의도된 차이 여부를 분석하고, compare_reviewer가 리뷰에 반영한다.
-  포맷은 [REVIEW_RULE.example.md](REVIEW_RULE.example.md) 참고.
-- **대형 PR 지원**: diff를 자르지 않는다. 호출당 예산(`max_diff_chars` 등)을 넘으면
-  파일 단위 배치로 쪼개 LLM을 여러 번 호출(동시 `--llm-concurrency`개)하고,
-  summary는 별도 병합 호출로, 인라인 코멘트는 중복 제거 후 합친다.
-- **리뷰 중복 방지**: 이미 PR에 달린 코멘트(봇/사람 모두)를 읽어 reviewer에 전달한다.
-  같은 취지의 지적은 새로 달지 않고, 기존 인라인 코멘트 스레드에 "동일한 의견입니다"
-  답글을 단다 (답글 미지원 서버면 원문 인용 일반 코멘트로 fallback).
-- **느린 로컬 LLM 대응**: 호출당 타임아웃 기본 600초(`--llm-timeout`),
-  실패 시 자동 재시도(`--llm-retries`), 동시 호출 수 제한(`--llm-concurrency`).
-- **인라인 코멘트 검증**: diff를 파싱해 라인번호 주석(R/L)을 붙여 LLM에 주고,
-  LLM이 지정한 (path, line, side)가 실제 diff 안에 있는지 검증한다.
-  검증 실패한 코멘트는 PR 전체 코멘트 하단에 "기타 지적"으로 합쳐진다.
+- **리뷰 중복 방지**: 이미 달린 코멘트(봇/사람)를 aggregator에 전달. 같은 취지의 지적은
+  새로 달지 않고 기존 인라인 코멘트에 "동일한 의견입니다" 답글(미지원 서버면 일반 코멘트 fallback).
+- **인라인 코멘트 검증**: aggregator가 만든 (path, line)이 실제 diff 라인 안에 있는지 검증.
+  탈락분은 PR 전체 코멘트 하단 "기타 지적"으로.
+- **thinking 제어**: Qwen3 thinking은 출력 토큰을 늘려 타임아웃을 유발할 수 있어 기본 비활성
+  (`enable_thinking=false` + 탐색 호출은 빠르게). 깊은 판단이 필요하면 `--think`로 켠다.
+- **JSON 견고성**: 응답 전체를 감싼 코드펜스만 벗기고(summary 내부 펜스는 보존),
+  문자열 내 raw 개행 허용, line/comment_id의 문자열→정수 보정, 실패 시 복구 재시도.
 
 ## 파일 구성
 
-`graph.py`가 중심이고 나머지는 그래프 노드들이 쓰는 도구다. LangChain은 쓰지 않는다
-(LLM은 openai SDK 직접 호출, GitHub은 mcp SDK 직접 호출).
-
-| 파일 | 역할 | 의존 |
-|---|---|---|
-| `main.py` | 엔트리포인트 — MCP 세션을 열고 그래프를 1회 실행 | config, github_mcp, graph, llm |
-| `graph.py` | **파이프라인 본체** — 노드 6개 정의 + 와이어링, 배치 처리, JSON 파싱/검증 | 아래 전부 |
-| `config.py` | CLI 인자/환경변수 → `Config` (호출당 예산, 타임아웃 등 튜닝값 포함) | — |
-| `github_mcp.py` | GitHub MCP stdio 클라이언트 래퍼 — 툴 이름은 상단 `TOOLS` 딕셔너리에 집중 | mcp SDK |
-| `llm.py` | OpenAI-compatible LLM 래퍼 — 타임아웃/재시도/동시성 제한 | openai SDK |
-| `diff_utils.py` | diff 파싱·라인번호 주석, 파일 단위 분할, 배치 패킹, 인라인 코멘트 검증 | — |
-| `rules.py` | REVIEW_RULE.md의 `reference_environments` 파싱, 참고 환경 경로 생성 | pyyaml |
-| `prompts.py` | 에이전트 3개 + JSON 복구 + summary 병합 프롬프트 | — |
-| `REVIEW_RULE.example.md` | 룰 파일 권장 포맷 예시 | — |
+| 파일 | 역할 |
+|---|---|
+| `main.py` | 엔트리포인트 |
+| `graph.py` | LangGraph 파이프라인 (planner → fan-out → agents → aggregator → 게시) |
+| `agent.py` | **tool use loop** — 에이전트 1개를 도구 호출이 멈출 때까지 구동 |
+| `tools.py` | 로컬 fs 도구 + native function calling 스키마 + 실행 디스패처 |
+| `llm.py` | OpenAI-compatible 래퍼 (`chat`, `chat_with_tools`, thinking 제어) |
+| `github_mcp.py` | GitHub MCP — PR 메타 조회와 게시 전용 (파일 읽기는 로컬 도구가 담당) |
+| `diff_utils.py` | diff 파싱·라인번호 주석, 파일 단위 분할, 인라인 코멘트 검증 |
+| `prompts.py` | planner / agent / aggregator 프롬프트 |
+| `config.py` | CLI 인자/환경변수 |
+| `REVIEW_RULE.example.md` | 룰 파일 권장 포맷 예시 (에이전트가 read해서 참고) |
 
 ## 설정
 
-모든 값은 CLI 파라미터 또는 환경변수로 줄 수 있다. **CLI 인자 > 환경변수** 우선순위.
+CLI 파라미터 또는 환경변수. **CLI 인자 > 환경변수** 우선순위.
 
-| CLI 파라미터 | 환경변수 | 필수 | 설명 |
+| CLI | 환경변수 | 필수 | 설명 |
 |---|---|---|---|
-| `--github-token` | `GITHUB_TOKEN` | ✅ | GitHub PAT (repo, PR 읽기/코멘트 권한) |
-| `--repo` | `GITHUB_REPOSITORY` | ✅ | `owner/repo` (env는 `REPO_OWNER`+`REPO_NAME` 분리형도 허용) |
+| `--github-token` | `GITHUB_TOKEN` | ✅ | GitHub PAT (PR 읽기/코멘트) |
+| `--repo` | `GITHUB_REPOSITORY` | ✅ | `owner/repo` |
 | `--pr-number` | `PR_NUMBER` | ✅ | 리뷰할 PR 번호 |
-| `--llm-base-url` | `LLM_BASE_URL` | ✅ | 로컬 LLM OpenAI-compatible 엔드포인트 (예: `http://llm:8000/v1`) |
+| `--repo-dir` | `REPO_DIR` | ✅* | **로컬 레포 경로** (PR 브랜치 checkout됨). 도구가 여기서 파일을 읽음. 기본 `.` |
+| `--llm-base-url` | `LLM_BASE_URL` | ✅ | OpenAI-compatible 엔드포인트 |
 | `--llm-model` | `LLM_MODEL` | ✅ | 모델 이름 |
 | `--llm-api-key` | `LLM_API_KEY` | | 기본 `dummy` |
-| `--llm-timeout` | `LLM_TIMEOUT` | | LLM 호출당 대기 시간(초), 기본 `600` |
-| `--llm-retries` | `LLM_MAX_RETRIES` | | 호출 실패 시 재시도 횟수, 기본 `2` |
-| `--llm-concurrency` | `LLM_CONCURRENCY` | | LLM 동시 호출 수, 기본 `2` |
-| `--mcp-cmd` | `GITHUB_MCP_CMD` | | MCP 서버 실행 커맨드. 기본: `docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server`. 바이너리가 있으면 `github-mcp-server stdio` |
-| `--language` | `REVIEW_LANGUAGE` | | 리뷰 언어, 기본 `Korean` |
-| `--dry-run` | `DRY_RUN=1` | | GitHub에 게시하지 않고 로그로만 출력 |
+| `--max-turns` | `MAX_TURNS` | | 에이전트당 tool use loop 최대 턴, 기본 15 |
+| `--max-agents` | `MAX_AGENTS` | | planner가 만들 최대 에이전트 수, 기본 5 |
+| `--agent-concurrency` | `AGENT_CONCURRENCY` | | 에이전트 동시 실행 수, 기본 2 (단일 GPU면 1) |
+| `--llm-timeout` | `LLM_TIMEOUT` | | LLM 호출당 대기(초), 기본 600 |
+| `--llm-concurrency` | `LLM_CONCURRENCY` | | LLM 동시 호출 수, 기본 2 |
+| `--think` | `THINK` | | thinking 활성 (기본 비활성) |
+| `--mcp-cmd` | `GITHUB_MCP_CMD` | | 게시용 GitHub MCP 서버 커맨드 |
+| `--language` | `REVIEW_LANGUAGE` | | 리뷰 언어, 기본 Korean |
+| `--dry-run` | `DRY_RUN=1` | | 게시하지 않고 로그로만 |
 
 ## 실행
 
 ```bash
 pip install -r requirements.txt
 
-# CLI 파라미터로
+# Jenkins에서 PR 브랜치를 체크아웃한 워크스페이스에서 실행
 python main.py \
   --github-token ghp_xxx \
   --repo my-org/gitops \
   --pr-number 123 \
+  --repo-dir "$WORKSPACE" \
   --llm-base-url http://localhost:8000/v1 \
-  --llm-model qwen2.5-32b-instruct \
-  --dry-run                # 먼저 dry-run으로 테스트 권장
-
-# 또는 환경변수로
-export GITHUB_TOKEN=ghp_xxx
-export GITHUB_REPOSITORY=my-org/gitops
-export PR_NUMBER=123
-export LLM_BASE_URL=http://localhost:8000/v1
-export LLM_MODEL=qwen2.5-32b-instruct
-python main.py
+  --llm-model Qwen3.6-27B \
+  --agent-concurrency 1 \
+  --dry-run            # 먼저 dry-run 권장
 ```
 
-## Jenkins 연동 예시
+전제: **PR 브랜치가 `--repo-dir`에 git checkout 되어 있어야 한다** (도구가 head 기준으로
+파일을 읽는다). Jenkins라면 GitHub 트리거로 PR 브랜치를 체크아웃한 뒤 이 봇을 호출한다.
 
-GitHub webhook(PR opened/synchronize) → Generic Webhook Trigger로 PR 번호를 받는 형태.
+## REVIEW_RULE.md
 
-```groovy
-pipeline {
-    agent any
-    parameters {
-        string(name: 'PR_NUMBER', description: 'PR 번호')
-    }
-    environment {
-        GITHUB_TOKEN      = credentials('github-token')
-        GITHUB_REPOSITORY = 'my-org/gitops'
-        LLM_BASE_URL      = 'http://llm.internal:8000/v1'
-        LLM_MODEL         = 'qwen2.5-32b-instruct'
-    }
-    stages {
-        stage('Review') {
-            steps {
-                sh '''
-                    python3 -m venv .venv && . .venv/bin/activate
-                    pip install -r requirements.txt
-                    python main.py
-                '''
-            }
-        }
-    }
-}
-```
+레포에 두면 에이전트가 `read_file`로 읽어 규칙을 참고한다. 자유 텍스트지만,
+`reference_environments` 같은 환경 그룹 선언을 넣으면 에이전트가 환경 비교의 기준으로 삼는다.
+포맷은 [REVIEW_RULE.example.md](REVIEW_RULE.example.md) 참고.
 
 ## 참고
 
-- GitHub MCP 서버 버전에 따라 툴 이름이 다를 수 있다.
-  `github_mcp.py` 상단 `TOOLS` 딕셔너리만 맞춰주면 된다.
-  (현재 기준: `get_pull_request`, `get_pull_request_files`, `get_pull_request_diff`,
-  `get_file_contents`, `add_issue_comment`, `get_issue_comments`,
-  `get_pull_request_comments`, `create_pending_pull_request_review`,
-  `add_comment_to_pending_review`, `submit_pending_pull_request_review`.
-  답글용 `add_pull_request_review_comment`는 서버 버전에 따라 없을 수 있으며,
-  없으면 자동으로 일반 코멘트 fallback)
-- diff/파일 크기 상한(`config.py`의 `max_*`)을 로컬 LLM 컨텍스트 길이에 맞게 조정할 것.
+- GitHub MCP 서버 버전에 따라 게시 툴 이름이 다를 수 있다. `github_mcp.py` 상단 `TOOLS` 딕셔너리에서 조정.
+- 로컬 LLM이 **native function calling(tools 파라미터)** 을 지원해야 한다 (Qwen3.6 등 지원).
+  서버가 thinking을 강제하거나 tools를 미지원하면 `llm.py`에서 조정이 필요할 수 있다.
+- 게이트웨이 타임아웃이 계속 발생하면: thinking이 꺼졌는지(`<think>` 블록 유무), 도구 결과 상한
+  (`max_tool_result_chars`)을 더 줄였는지, 스트리밍/프록시 버퍼링 설정을 확인한다.
