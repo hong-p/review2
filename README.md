@@ -107,8 +107,11 @@ g.add_edge("agent", "aggregator")                                # 모두 끝나
 
 - **리뷰 중복 방지**: 이미 달린 코멘트(봇/사람)를 aggregator에 전달. 같은 취지의 지적은
   새로 달지 않고 기존 인라인 코멘트에 "동일한 의견입니다" 답글(미지원 서버면 일반 코멘트 fallback).
-- **인라인 코멘트 검증**: aggregator가 만든 (path, line)이 실제 diff 라인 안에 있는지 검증.
-  탈락분은 PR 전체 코멘트 하단 "기타 지적"으로.
+- **인라인 vs 통합리뷰 분리**: aggregator가 만든 (path, line)이 실제 diff 라인 안에 있으면
+  **인라인 코멘트**, 없으면(변경 안 된 라인·다른 환경 파일 등) **통합리뷰**(전체 코멘트 하단)로 보낸다.
+  LLM이 라인을 부정확하게 잡아도 GitHub이 거부하지 않게 거르는 안전장치. 어디로 갔는지 로그에 남는다.
+- **상세 로깅**: `--debug`면 LLM 요청/응답 전문, 에이전트 이름·loop(턴) 번호, 도구 호출 인자/결과,
+  인라인 등록 실패 사유를 출력한다. INFO는 흐름 요약만.
 - **thinking 제어**: Qwen3 thinking은 출력 토큰을 늘려 타임아웃을 유발할 수 있어 기본 비활성
   (`enable_thinking=false` + 탐색 호출은 빠르게). 깊은 판단이 필요하면 `--think`로 켠다.
 - **JSON 견고성**: 응답 전체를 감싼 코드펜스만 벗기고(summary 내부 펜스는 보존),
@@ -149,6 +152,8 @@ CLI 파라미터 또는 환경변수. **CLI 인자 > 환경변수** 우선순위
 | `--llm-concurrency` | `LLM_CONCURRENCY` | | LLM 동시 호출 수, 기본 2 |
 | `--think` | `THINK` | | thinking 활성 (기본 비활성) |
 | `--github-api-url` | `GITHUB_API_URL` | | GitHub REST API base URL. GHE면 `https://<host>/api/v3`, 기본 `https://api.github.com` |
+| `--log-level` | `LOG_LEVEL` | | DEBUG/INFO/WARNING/ERROR, 기본 INFO |
+| `--debug` | `DEBUG=1` | | `--log-level DEBUG` 단축 — LLM 요청/응답 전문 출력 |
 | `--language` | `REVIEW_LANGUAGE` | | 리뷰 언어, 기본 Korean |
 | `--dry-run` | `DRY_RUN=1` | | 게시하지 않고 로그로만 |
 

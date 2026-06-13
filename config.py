@@ -40,6 +40,8 @@ class Config:
     review_language: str = "Korean"
     dry_run: bool = False
     no_think: bool = True   # 탐색 턴에서 thinking 비활성 (Qwen3 /no_think). 타임아웃 방지
+    log_level: str = "INFO"  # DEBUG면 LLM 요청/응답 전문까지 출력
+    max_log_chars: int = 4_000  # DEBUG 로그에서 요청/응답 1건 출력 상한
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -83,6 +85,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--think", action="store_true",
                    default=env("THINK", "") in ("1", "true", "yes"),
                    help="탐색 턴에서도 thinking 활성 (기본은 비활성) [env: THINK=1]")
+    p.add_argument("--log-level", default=env("LOG_LEVEL", "INFO").upper(),
+                   choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                   help="로그 레벨. DEBUG면 LLM 요청/응답 전문 출력 [env: LOG_LEVEL, 기본 INFO]")
+    p.add_argument("--debug", action="store_true",
+                   default=env("DEBUG", "") in ("1", "true", "yes"),
+                   help="--log-level DEBUG 단축 [env: DEBUG=1]")
     return p
 
 
@@ -115,6 +123,7 @@ def load_config(argv: list[str] | None = None) -> Config:
         review_language=args.language,
         dry_run=args.dry_run,
         no_think=not args.think,
+        log_level="DEBUG" if args.debug else args.log_level,
     )
 
     missing = [

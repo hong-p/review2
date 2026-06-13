@@ -14,19 +14,19 @@ from github_api import github_api
 from graph import build_graph
 from llm import LLM
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    stream=sys.stdout,
-)
 log = logging.getLogger("review-bot")
 
 
 async def run() -> int:
     cfg = load_config()
+    logging.basicConfig(
+        level=getattr(logging, cfg.log_level, logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stdout,
+    )
     log.info(
-        "리뷰 시작: %s/%s PR #%d (dry_run=%s)",
-        cfg.owner, cfg.repo, cfg.pr_number, cfg.dry_run,
+        "리뷰 시작: %s/%s PR #%d (dry_run=%s, log_level=%s)",
+        cfg.owner, cfg.repo, cfg.pr_number, cfg.dry_run, cfg.log_level,
     )
     async with github_api(cfg) as gh:
         llm = LLM(cfg)

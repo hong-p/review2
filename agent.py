@@ -37,30 +37,37 @@ async def run_agent(llm: LLM, agent: dict, ctx: ToolContext, max_turns: int,
     ]
 
     for turn in range(max_turns):
-        msg = await llm.chat_with_tools(messages, TOOL_SCHEMAS, no_think=no_think)
+        tag = f"agent[{name}] turn {turn + 1}/{max_turns}"
+        msg = await llm.chat_with_tools(messages, TOOL_SCHEMAS, no_think=no_think, tag=tag)
         messages.append(_assistant_dict(msg))
 
         if not getattr(msg, "tool_calls", None):
             findings = (msg.content or "").strip() or "특이사항 없음"
-            log.info("에이전트 '%s' 완료 (%d턴)", name, turn + 1)
+            log.info("[agent:%s] 완료 (%d턴): 발견사항 %d자", name, turn + 1, len(findings))
             return {"name": name, "findings": findings}
 
+        names = [tc.function.name for tc in msg.tool_calls]
+        log.info("[agent:%s turn %d] 도구 호출: %s", name, turn + 1, ", ".join(names))
         for tc in msg.tool_calls:
             result = _run_one_tool(tc, ctx)
+            level = logging.WARNING if result.startswith("ERROR") else logging.DEBUG
+            log.log(level, "[agent:%s turn %d] %s(%s) → %d자%s",
+                    name, turn + 1, tc.function.name, _short_args(tc.function.arguments),
+                    len(result), "" if level == logging.DEBUG else f" [{result[:80]}]")
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
                 "content": result,
             })
-        log.debug("에이전트 '%s' 턴 %d: 도구 %d개 실행", name, turn + 1, len(msg.tool_calls))
 
     # 턴 초과 → 도구 없이 결론 강제
-    log.warning("에이전트 '%s' 최대 턴(%d) 도달 — 결론 강제", name, max_turns)
+    log.warning("[agent:%s] 최대 턴(%d) 도달 — 결론 강제", name, max_turns)
     messages.append({
         "role": "user",
         "content": "도구 사용을 멈추고, 지금까지 확인한 내용만으로 발견사항을 형식에 맞춰 출력하라.",
     })
-    msg = await llm.chat_with_tools(messages, tools=[], no_think=no_think)
+    msg = await llm.chat_with_tools(messages, tools=[], no_think=no_think,
+                                    tag=f"agent[{name}] 결론강제")
     findings = (msg.content or "").strip() or "(턴 초과로 리뷰 미완)"
     return {"name": name, "findings": findings}
 
@@ -74,6 +81,11 @@ def _run_one_tool(tc, ctx: ToolContext) -> str:
     if not isinstance(args, dict):
         return "ERROR: 도구 인자는 JSON 객체여야 한다."
     return execute_tool(name, args, ctx)
+
+
+def _short_args(raw: str, limit: int = 120) -> str:
+    raw = raw or ""
+    return raw if len(raw) <= limit else raw[:limit] + "…"
 
 
 def _assistant_dict(msg) -> dict:

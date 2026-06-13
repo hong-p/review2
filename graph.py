@@ -100,7 +100,8 @@ def build_graph(gh: GitHubAPI, llm: LLM, cfg: Config):
             f"## 변경된 파일 ({len(state['changed_files'])}개)\n{file_list}"
         )
         raw = await llm.chat(
-            prompts.PLANNER_SYSTEM.format(max_agents=cfg.max_agents), user, no_think=True
+            prompts.PLANNER_SYSTEM.format(max_agents=cfg.max_agents), user,
+            no_think=True, tag="planner",
         )
         agents = _parse_agents(raw, state["changed_files"], cfg.max_agents)
         log.info("planner: 에이전트 %d개 — %s", len(agents), [a["name"] for a in agents])
@@ -135,21 +136,27 @@ def build_graph(gh: GitHubAPI, llm: LLM, cfg: Config):
             )
         user = f"# 에이전트 발견사항\n{findings_text}{existing_section}"
         raw = await llm.chat(
-            prompts.AGGREGATOR_SYSTEM.format(language=lang), user, no_think=cfg.no_think
+            prompts.AGGREGATOR_SYSTEM.format(language=lang), user,
+            no_think=cfg.no_think, tag="aggregator",
         )
         try:
             review = _extract_json(raw)
         except (ValueError, json.JSONDecodeError):
             log.warning("리뷰 JSON 파싱 실패 — 복구 시도")
-            repaired = await llm.chat(prompts.JSON_REPAIR_SYSTEM, raw, temperature=0.0, no_think=True)
+            repaired = await llm.chat(prompts.JSON_REPAIR_SYSTEM, raw, temperature=0.0,
+                                      no_think=True, tag="aggregator-json-repair")
             review = _extract_json(repaired)
 
         summary = str(review.get("summary", "")).strip()
         comments = _normalize_comments(review.get("inline_comments") or [])
+        # diff에 있는 라인 → 인라인 코멘트, diff 밖 라인 → 통합리뷰(요약 하단)로 분리
         ok, dropped = validate_comments(comments, state["valid_lines"])
+        for c in dropped:
+            log.info("[aggregator] diff 밖 라인이라 인라인 불가 → 통합리뷰로 이동: %s:%s",
+                     c.get("path"), c.get("line"))
         agreements = _normalize_agreements(review.get("agreements") or [], state["existing_comments"])
         log.info(
-            "aggregator: 인라인 %d개 (탈락 %d), 기존 코멘트 동의 %d개",
+            "[aggregator] 인라인 %d개 / 통합리뷰로 이동 %d개 / 기존 코멘트 동의 %d개",
             len(ok), len(dropped), len(agreements),
         )
         return {
@@ -168,7 +175,7 @@ def build_graph(gh: GitHubAPI, llm: LLM, cfg: Config):
                 f"- `{c.get('path')}:{c.get('line')}` — {c.get('body')}"
                 for c in state["dropped_comments"]
             )
-            body += f"\n\n---\n### 기타 지적 (라인 특정 실패)\n{extra}"
+            body += f"\n\n---\n### 추가 지적 (diff에 없는 라인이라 인라인 불가)\n{extra}"
         if cfg.dry_run:
             log.info("[DRY_RUN] PR 전체 코멘트:\n%s", body)
             return {"posted_summary": False}
