@@ -42,6 +42,7 @@ class ReviewState(TypedDict, total=False):
     pr_body: str
     changed_files: list[dict]
     repo_tree: str
+    team_rules: str
     valid_lines: dict
     existing_comments: list[dict]
     agents: list[dict]                              # planner 결과
@@ -85,8 +86,10 @@ def build_graph(gh: GitHubAPI, llm: LLM, cfg: Config):
         )
         repo_tree = build_repo_tree(cfg.repo_dir, cfg.max_tree_depth, cfg.max_tree_chars)
 
-        # REVIEW_RULE.md의 environment_checks로 비교 대상 환경/파일을 결정론적으로 산출
+        # REVIEW_RULE.md: environment_checks로 비교 대상 산출 + 리뷰 포맷 등 전체 텍스트는
+        # aggregator가 최종 리뷰 형식/톤에 반영하도록 보관
         rule_texts = _read_rule_files(cfg.repo_dir, changed)
+        team_rules = clip("\n\n".join(rule_texts), cfg.max_rule_chars, "룰") if rule_texts else ""
         checks = parse_environment_checks(rule_texts)
         comparisons, peer_paths, unresolved = resolve_comparisons(
             [c["path"] for c in changed], checks, cfg.repo_dir,
@@ -105,6 +108,7 @@ def build_graph(gh: GitHubAPI, llm: LLM, cfg: Config):
             "pr_body": pr.get("body") or "",
             "changed_files": changed,
             "repo_tree": repo_tree,
+            "team_rules": team_rules,
             "valid_lines": valid_lines,
             "existing_comments": existing,
         }
@@ -159,7 +163,13 @@ def build_graph(gh: GitHubAPI, llm: LLM, cfg: Config):
                 "\n\n## 이미 PR에 달린 코멘트 (중복 지적 금지, 같은 취지면 agreements로)\n"
                 + _format_existing(state["existing_comments"], cfg.max_comments_chars)
             )
-        user = f"# 에이전트 발견사항\n{findings_text}{existing_section}"
+        rules_section = ""
+        if state.get("team_rules"):
+            rules_section = (
+                "\n\n## 팀 리뷰 규칙 (리뷰 포맷·톤·심각도 기준을 여기에 맞춰라)\n"
+                + state["team_rules"]
+            )
+        user = f"# 에이전트 발견사항\n{findings_text}{existing_section}{rules_section}"
         raw = await llm.chat(
             prompts.AGGREGATOR_SYSTEM.format(language=lang), user,
             no_think=cfg.no_think, tag="aggregator",

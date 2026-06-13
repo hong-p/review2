@@ -35,6 +35,7 @@ class Config:
     max_file_chars: int = 20_000         # read_file 1회 상한
     max_diff_chars: int = 40_000         # get_diff 결과 상한
     max_comments_chars: int = 15_000     # 기존 리뷰 코멘트 전달 상한
+    max_rule_chars: int = 6_000          # aggregator에 줄 룰 텍스트(리뷰 포맷 등) 상한
     max_tree_depth: int = 6              # planner에 줄 레포 트리 깊이 (overlay/<env>까지 보이게)
     max_tree_chars: int = 6_000          # planner에 줄 레포 트리 크기 상한
 
